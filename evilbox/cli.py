@@ -85,9 +85,15 @@ def _main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw:
         return run_interactive(_main)
+    if raw and raw[0] == "serve":
+        from evilbox.web import serve_main
+
+        return serve_main(raw[1:])
+
     parser = argparse.ArgumentParser(
         prog="evilbox",
         description="Evilbox: deobfuscate JavaScript or PHP, classify capabilities/roles, and extract scanner-visible signatures from the original file.",
+        epilog="evilbox serve [--host HOST] [--port PORT]  opens a local web UI for paste/upload decoding (static analysis only).",
     )
     parser.add_argument("input", nargs="?", help="Input file, directory of samples, or - for stdin")
     parser.add_argument("-o", "--output", help="Write cleaned source to this file (or directory in batch mode)")

@@ -1,8 +1,8 @@
 # Evilbox
 
-CLI that **statically** deobfuscates JavaScript and PHP, then helps with **analysis and classification**. It unwraps common encodings, rewrites the syntax tree, labels capabilities and malware roles, extracts IOCs, and suggests **scanner-visible** strings from the original packed file.
+CLI that **statically** deobfuscates JavaScript and PHP, then helps with **analysis and classification**. It unwraps common encodings, rewrites the syntax tree, labels capabilities and malware roles, extracts IOCs, and suggests **scanner-visible** strings from the original packed file. `evilbox serve` exposes the same static path as a paste/upload web UI.
 
-It does **not** execute the input in a JS or PHP engine. The optional Docker PHP sandbox is a separate, isolated lab.
+It does **not** execute the input in a JS or PHP engine. The optional Docker PHP sandbox is a separate, isolated lab (CLI only).
 
 ## Install
 
@@ -12,6 +12,7 @@ From this project folder:
 
 ```text
 bin/evilbox
+bin/evilbox serve
 bin/evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 ```
 
@@ -25,6 +26,7 @@ No arguments opens a small menu. Any extra arguments skip the menu:
 
 ```text
 evilbox
+evilbox serve
 evilbox packed.js -o clean.js
 evilbox packed.php --lang php
 evilbox - --lang js < packed.js
@@ -44,12 +46,50 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
 | `--logs-dir PATH` | Sandbox log root (default: `EVILBOX_LOGS` or `./sandbox-logs`) |
 | `--timeout N` | Sandbox PHP timeout in seconds (default: 15) |
+| `serve` | Local web UI + JSON API for paste/upload decoding |
 
 If the input is a directory, Evilbox walks `.js` / `.php` files, writes `*.clean.*` plus `*.report.json`, and a `clusters.json` map of similar inner-layer hashes.
 
 `-o clean.js` also writes `clean.iocs.json` and `clean.report.json` unless `--report` is set.
 
 Exit status `1` means the result still does not parse cleanly; the best-effort output is still written. Missing files, permission problems, and other failures print a short `error:` line (exit `2`) instead of a traceback. Set `EVILBOX_DEBUG=1` if you need the full stack.
+
+## Web decoder
+
+`evilbox serve` starts a small HTTP server (stdlib only) so anyone can paste source or upload a `.js` / `.php` file and get the same static decode + report the CLI produces.
+
+```text
+evilbox serve
+evilbox serve --host 127.0.0.1 --port 8080 --open
+```
+
+Open `http://127.0.0.1:8080/`. Bind `--host 0.0.0.0` only if you intend other machines to reach it.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Browser UI |
+| `GET` | `/health` | Liveness (`sandbox` is always `false`) |
+| `GET` | `/api/examples` | Built-in demo samples |
+| `POST` | `/api/decode` | Decode a sample |
+
+POST body:
+
+- JSON `{"source":"...","lang":"auto|js|php","filename":"optional.php"}`
+- raw `text/plain` (language via `?lang=php`)
+- `multipart/form-data` with a `file` field
+
+```text
+curl -s -X POST http://127.0.0.1:8080/api/decode \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"<?php eval(base64_decode('"'"'ZWNobyAiaGkiOw=='"'"'));","lang":"php"}'
+
+curl --data-binary @packed.php -H 'Content-Type: text/plain' \
+  'http://127.0.0.1:8080/api/decode?lang=php&filename=packed.php'
+```
+
+The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`).
+
+The no-argument menu also has **Open the web decoder**.
 
 ## Classification
 
