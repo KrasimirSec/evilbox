@@ -65,8 +65,43 @@ def test_interactive_menu_static(tmp_path, monkeypatch, capsys):
 
 
 def test_interactive_quit(monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "5")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "6")
     assert main([]) == 0
+
+
+def test_interactive_web_menu(monkeypatch):
+    calls = []
+
+    def capture(argv):
+        calls.append(argv)
+        return 0
+
+    replies = iter(["5", "127.0.0.1", "8765", "n"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(replies))
+    from evilbox.interactive import run_interactive
+
+    assert run_interactive(capture) == 0
+    assert calls == [["serve", "--host", "127.0.0.1", "--port", "8765"]]
+
+
+def test_cli_help_mentions_serve(capsys):
+    try:
+        main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("expected --help to exit")
+    out = capsys.readouterr().out
+    assert "evilbox serve" in out
+    try:
+        main(["serve", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("expected --help to exit")
+    out = capsys.readouterr().out
+    assert "web UI" in out or "web" in out.lower()
+    assert "sandbox is not exposed" in out
 
 
 def test_cli_missing_file(tmp_path, capsys):

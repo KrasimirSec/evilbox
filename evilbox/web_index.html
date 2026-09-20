@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evilbox — static JS / PHP decoder</title>
+  <meta name="description" content="Paste or upload obfuscated JavaScript or PHP. Evilbox unwraps it statically: no JS or PHP engine, nothing is executed.">
+  <style>
+    :root {
+      --bg: #0c0d10;
+      --bg-2: #12141a;
+      --panel: #171a21;
+      --panel-2: #1d212b;
+      --line: #2c3140;
+      --text: #e8ecf4;
+      --muted: #8d95a8;
+      --faint: #6b7386;
+      --accent: #e36a3d;
+      --accent-2: #f3c15c;
+      --ok: #3ecf8e;
+      --bad: #ef5d73;
+      --info: #7aa2ff;
+      --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+      --mono: "ui-monospace", "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+      --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: var(--sans);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, rgba(227, 106, 61, 0.12), transparent 50%),
+        radial-gradient(900px 400px at 100% 0%, rgba(122, 162, 255, 0.08), transparent 45%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    a { color: var(--accent-2); }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1.1rem 1.4rem 0.4rem;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .brand { display: flex; align-items: center; gap: 0.85rem; }
+    .mark {
+      width: 42px; height: 42px; flex: none;
+      border: 1px solid var(--line);
+      background: linear-gradient(160deg, #2a1d18, #15171d);
+      display: grid; place-items: center;
+      box-shadow: inset 0 0 0 1px rgba(227, 106, 61, 0.25);
+    }
+    .brand h1 {
+      font-size: 1.15rem;
+      letter-spacing: 0.14em;
+      margin: 0;
+      font-weight: 700;
+    }
+    .brand p { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.85rem; }
+    .pill {
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.75rem;
+      padding: 0.35rem 0.6rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 1rem 1.4rem 2.5rem;
+      display: grid;
+      grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.25fr);
+      gap: 1rem;
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; padding: 1rem; }
+      header { padding: 1rem; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+    .card h2 {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    .pad { padding: 1rem; }
+    textarea, pre, code, button, select, .drop {
+      font-family: var(--mono);
+    }
+    textarea {
+      width: 100%;
+      min-height: 280px;
+      resize: vertical;
+      background: var(--bg-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      padding: 0.8rem;
+      font-size: 0.85rem;
+      line-height: 1.45;
+    }
+    textarea:focus { outline: 1px solid var(--accent); }
+    .drop {
+      margin-top: 0.7rem;
+      border: 1px dashed var(--line);
+      padding: 0.7rem;
+      color: var(--faint);
+      font-size: 0.8rem;
+      text-align: center;
+      background: var(--panel-2);
+    }
+    .drop.over { border-color: var(--accent); color: var(--text); }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.8rem;
+    }
+    select, button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      padding: 0.55rem 0.75rem;
+      font-size: 0.85rem;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: #c4562f;
+      color: #160b07;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    button.primary:disabled { opacity: 0.55; cursor: wait; }
+    button.linkish { cursor: pointer; }
+    button.linkish:hover, select:hover { border-color: var(--accent-2); }
+    .examples { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.7rem; }
+    .examples button { font-size: 0.75rem; }
+    .note { color: var(--muted); font-size: 0.8rem; line-height: 1.45; margin-top: 0.85rem; }
+    .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.75rem 1rem 0; }
+    .chip {
+      font-size: 0.75rem;
+      border: 1px solid var(--line);
+      padding: 0.25rem 0.5rem;
+      color: var(--muted);
+    }
+    .chip strong { color: var(--text); font-weight: 600; }
+    .chip.ok { border-color: rgba(62, 207, 142, 0.45); color: var(--ok); }
+    .chip.bad { border-color: rgba(239, 93, 115, 0.45); color: var(--bad); }
+    .chip.role { border-color: rgba(243, 193, 92, 0.5); color: var(--accent-2); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--line); }
+    .tabs button {
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .tabs button.active { background: var(--panel-2); color: var(--text); }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.65rem 1rem 0; }
+    .codebox {
+      margin: 0.8rem 1rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      max-height: 420px;
+      overflow: auto;
+    }
+    .codebox pre {
+      margin: 0;
+      padding: 0.85rem;
+      font-size: 0.8rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .empty { color: var(--faint); padding: 2rem 1rem; text-align: center; }
+    .error {
+      margin: 0.75rem 1rem 0;
+      border: 1px solid rgba(239, 93, 115, 0.4);
+      color: var(--bad);
+      padding: 0.6rem 0.75rem;
+      font-size: 0.85rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    td code { font-size: 0.78rem; word-break: break-all; }
+    .analysis { padding: 0 1rem 1rem; }
+    .analysis h3 {
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 1rem 0 0.4rem;
+    }
+    .ev { color: var(--faint); font-size: 0.75rem; margin: 0.15rem 0 0.4rem 0.2rem; }
+    footer {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 1.4rem 2rem;
+      color: var(--faint);
+      font-size: 0.75rem;
+    }
+    .hidden { display: none; }
+    .layer-pick { margin: 0.7rem 1rem 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+          <rect x="4" y="9" width="16" height="11" stroke="#e36a3d" stroke-width="1.6"/>
+          <path d="M8 9V7a4 4 0 0 1 8 0v2" stroke="#f3c15c" stroke-width="1.6"/>
+        </svg>
+      </div>
+      <div>
+        <h1>EVILBOX</h1>
+        <p>Static JavaScript and PHP deobfuscator</p>
+      </div>
+    </div>
+    <div class="pill">Not executed</div>
+  </header>
+  <main>
+    <section class="card" aria-labelledby="input-title">
+      <h2 id="input-title">Sample</h2>
+      <div class="pad">
+        <label class="hidden" for="source">Packed source</label>
+        <textarea id="source" spellcheck="false" placeholder="Paste packed JavaScript or PHP, or drop a .js / .php file."></textarea>
+        <div class="drop" id="drop">Drop a file here, or <label for="file" style="cursor:pointer;color:var(--accent-2);text-decoration:underline">browse</label>
+          <input id="file" type="file" accept=".js,.mjs,.cjs,.php,.phtml,.txt" hidden>
+        </div>
+        <div class="row">
+          <label>Language
+            <select id="lang">
+              <option value="auto">auto</option>
+              <option value="js">js</option>
+              <option value="php">php</option>
+            </select>
+          </label>
+          <button class="primary" id="decode" type="button">Decode</button>
+        </div>
+        <div class="examples" id="examples"></div>
+        <p class="note">
+          Unwraps encodings and rewrites the syntax tree in-process. No JS engine, no PHP engine,
+          and the Docker sandbox is not available here. Submissions are kept in memory for this
+          request only.
+        </p>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="out-title">
+      <h2 id="out-title">Decoded</h2>
+      <div id="error" class="error hidden"></div>
+      <div class="chips" id="chips"></div>
+      <div class="actions">
+        <button class="linkish" id="copy" type="button" disabled>Copy decoded</button>
+        <button class="linkish" id="dl-src" type="button" disabled>Download source</button>
+        <button class="linkish" id="dl-json" type="button" disabled>Download report</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="active" data-tab="decoded" type="button">Decoded</button>
+        <button data-tab="original" type="button">Original</button>
+        <button data-tab="layers" type="button">Layers</button>
+        <button data-tab="analysis" type="button">Analysis</button>
+        <button data-tab="json" type="button">JSON</button>
+      </div>
+      <div class="layer-pick hidden" id="layer-pick-wrap">
+        <label>Layer <select id="layer-pick"></select></label>
+      </div>
+      <div class="codebox" id="code-panel">
+        <p class="empty" id="empty">Paste a packed sample and press Decode.</p>
+        <pre class="hidden" id="code"></pre>
+      </div>
+      <div class="analysis hidden" id="analysis"></div>
+    </section>
+  </main>
+  <footer>
+    Evilbox report schema <code>evilbox.report.v1</code>. Roles are evidence-backed hints, not AV family names.
+    Hosting this UI as a paid service may require a commercial license; see the project LICENSE.
+  </footer>
+  <script>
+    const state = { result: null, tab: "decoded", filename: "" };
+    const $ = (id) => document.getElementById(id);
+
+    async function loadExamples() {
+      try {
+        const res = await fetch("/api/examples");
+        const data = await res.json();
+        const box = $("examples");
+        (data.examples || []).forEach((ex) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Try: " + ex.name;
+          btn.addEventListener("click", () => {
+            $("source").value = ex.source;
+            $("lang").value = ex.lang || "auto";
+            state.filename = ex.filename || "";
+          });
+          box.appendChild(btn);
+        });
+      } catch (_err) { /* examples are optional */ }
+    }
+
+    function setBusy(busy) {
+      $("decode").disabled = busy;
+      $("decode").textContent = busy ? "Decoding…" : "Decode";
+    }
+
+    function showError(msg) {
+      const el = $("error");
+      el.textContent = msg || "";
+      el.classList.toggle("hidden", !msg);
+    }
+
+    function download(name, text, type) {
+      const blob = new Blob([text], { type });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function extFor(lang) {
+      return lang === "php" ? ".php" : ".js";
+    }
+
+    function renderChips(result) {
+      const box = $("chips");
+      box.textContent = "";
+      if (!result) return;
+      const report = result.report || {};
+      const sample = report.sample || {};
+      const add = (label, value, cls) => {
+        const span = document.createElement("span");
+        span.className = "chip" + (cls ? " " + cls : "");
+        const strong = document.createElement("strong");
+        strong.textContent = label + " ";
+        span.appendChild(strong);
+        span.appendChild(document.createTextNode(value));
+        box.appendChild(span);
+      };
+      add("lang", sample.language || "?");
+      add("parse", report.parse_ok ? "ok" : "failed", report.parse_ok ? "ok" : "bad");
+      (report.packer || []).forEach((p) => add("packer", p));
+      (report.roles || []).forEach((r) => add("role", r.name + " " + Math.round((r.score || 0) * 100) + "%", "role"));
+      if (result.elapsed_ms != null) add("time", result.elapsed_ms + " ms");
+    }
+
+    function currentText() {
+      const result = state.result;
+      if (!result) return "";
+      if (state.tab === "decoded") return result.decoded || "";
+      if (state.tab === "original") {
+        const orig = (result.layers || []).find((l) => l.kind === "original" || l.name === "original");
+        return orig ? orig.text : "";
+      }
+      if (state.tab === "layers") {
+        const name = $("layer-pick").value;
+        const layer = (result.layers || []).find((l) => l.name === name) || (result.layers || [])[0];
+        return layer ? layer.text : "";
+      }
+      if (state.tab === "json") return JSON.stringify(result.report, null, 2);
+      return result.decoded || "";
+    }
+
+    function renderAnalysis(result) {
+      const box = $("analysis");
+      box.textContent = "";
+      const report = result.report || {};
+      const section = (title) => {
+        const h = document.createElement("h3");
+        h.textContent = title;
+        box.appendChild(h);
+        return h;
+      };
+      section("Roles");
+      const roles = report.roles || [];
+      if (!roles.length) {
+        const p = document.createElement("p");
+        p.className = "ev";
+        p.textContent = "none";
+        box.appendChild(p);
+      }
+      roles.forEach((role) => {
+        const p = document.createElement("p");
+        p.style.margin = "0.2rem 0";
+        p.textContent = role.name + " (" + role.score + ")";
+        box.appendChild(p);
+        (role.evidence || []).slice(0, 3).forEach((ev) => {
+          const e = document.createElement("div");
+          e.className = "ev";
+          e.textContent = "[" + (ev.layer || "") + "] " + (ev.snippet || "");
+          box.appendChild(e);
+        });
+      });
+      section("Capabilities");
+      const caps = report.capabilities || [];
+      const capLine = document.createElement("p");
+      capLine.style.margin = "0.2rem 0";
+      capLine.textContent = caps.length ? caps.map((c) => c.id).join(", ") : "none";
+      box.appendChild(capLine);
+
+      section("Indicators");
+      const iocs = report.indicators_by_layer || [];
+      if (!iocs.length) {
+        const p = document.createElement("p");
+        p.className = "ev";
+        p.textContent = "none";
+        box.appendChild(p);
+      } else {
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        ["layer", "kind", "value"].forEach((col) => {
+          const th = document.createElement("th");
+          th.textContent = col;
+          head.appendChild(th);
+        });
+        table.appendChild(head);
+        iocs.forEach((row) => {
+          const tr = document.createElement("tr");
+          [row.layer, row.kind, row.value].forEach((val, i) => {
+            const td = document.createElement("td");
+            if (i === 2) {
+              const code = document.createElement("code");
+              code.textContent = val || "";
+              td.appendChild(code);
+            } else {
+              td.textContent = val || "";
+            }
+            tr.appendChild(td);
+          });
+          table.appendChild(tr);
+        });
+        box.appendChild(table);
+      }
+
+      section("Surface signatures (original layer)");
+      const items = (report.surface_signatures || {}).items || [];
+      if (!items.length) {
+        const p = document.createElement("p");
+        p.className = "ev";
+        p.textContent = "none";
+        box.appendChild(p);
+      } else {
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        ["kind", "YARA needle", "why"].forEach((col) => {
+          const th = document.createElement("th");
+          th.textContent = col;
+          head.appendChild(th);
+        });
+        table.appendChild(head);
+        items.forEach((item) => {
+          const tr = document.createElement("tr");
+          const kind = document.createElement("td");
+          kind.textContent = item.kind || "";
+          const yara = document.createElement("td");
+          const code = document.createElement("code");
+          code.textContent = item.yara || "";
+          yara.appendChild(code);
+          const why = document.createElement("td");
+          why.textContent = item.why || "";
+          tr.appendChild(kind);
+          tr.appendChild(yara);
+          tr.appendChild(why);
+          table.appendChild(tr);
+        });
+        box.appendChild(table);
+      }
+    }
+
+    function render() {
+      const result = state.result;
+      const has = !!result;
+      $("copy").disabled = !has;
+      $("dl-src").disabled = !has;
+      $("dl-json").disabled = !has;
+      $("empty").classList.toggle("hidden", has);
+      const showCode = has && state.tab !== "analysis";
+      $("code").classList.toggle("hidden", !showCode);
+      $("analysis").classList.toggle("hidden", !(has && state.tab === "analysis"));
+      $("layer-pick-wrap").classList.toggle("hidden", !(has && state.tab === "layers"));
+      if (has && showCode) $("code").textContent = currentText();
+      if (has && state.tab === "analysis") renderAnalysis(result);
+    }
+
+    function fillLayers(result) {
+      const sel = $("layer-pick");
+      sel.textContent = "";
+      (result.layers || []).forEach((layer) => {
+        const opt = document.createElement("option");
+        opt.value = layer.name;
+        opt.textContent = layer.name + " · " + layer.size + " bytes";
+        sel.appendChild(opt);
+      });
+      if (result.layers && result.layers.length) {
+        sel.value = result.layers[result.layers.length - 1].name;
+      }
+    }
+
+    async function decode() {
+      showError("");
+      const source = $("source").value;
+      if (!source.trim()) {
+        showError("Paste or upload a JavaScript or PHP sample.");
+        return;
+      }
+      setBusy(true);
+      try {
+        const res = await fetch("/api/decode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source,
+            lang: $("lang").value,
+            filename: state.filename || undefined
+          })
+        });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) {
+          state.result = null;
+          renderChips(null);
+          render();
+          showError(data.error || ("HTTP " + res.status));
+          return;
+        }
+        state.result = data;
+        state.tab = "decoded";
+        document.querySelectorAll(".tabs button").forEach((b) => {
+          b.classList.toggle("active", b.dataset.tab === "decoded");
+        });
+        fillLayers(data);
+        renderChips(data);
+        render();
+      } catch (err) {
+        showError(err.message || String(err));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    $("decode").addEventListener("click", decode);
+    $("source").addEventListener("keydown", (ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") decode();
+    });
+    document.querySelectorAll(".tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.tab = btn.dataset.tab;
+        document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b === btn));
+        render();
+      });
+    });
+    $("layer-pick").addEventListener("change", render);
+    $("copy").addEventListener("click", async () => {
+      if (!state.result) return;
+      try {
+        await navigator.clipboard.writeText(state.result.decoded || "");
+      } catch (_err) { /* ignore */ }
+    });
+    $("dl-src").addEventListener("click", () => {
+      if (!state.result) return;
+      const lang = (state.result.report && state.result.report.sample && state.result.report.sample.language) || "js";
+      download("evilbox-decoded" + extFor(lang), state.result.decoded || "", "text/plain");
+    });
+    $("dl-json").addEventListener("click", () => {
+      if (!state.result) return;
+      download("evilbox-report.json", JSON.stringify(state.result.report, null, 2) + "\n", "application/json");
+    });
+
+    function loadFile(file) {
+      if (!file) return;
+      state.filename = file.name || "";
+      const reader = new FileReader();
+      reader.onload = () => { $("source").value = String(reader.result || ""); };
+      reader.readAsText(file);
+    }
+    $("file").addEventListener("change", (ev) => loadFile(ev.target.files[0]));
+    const drop = $("drop");
+    ["dragenter", "dragover"].forEach((name) => {
+      drop.addEventListener(name, (ev) => { ev.preventDefault(); drop.classList.add("over"); });
+    });
+    ["dragleave", "drop"].forEach((name) => {
+      drop.addEventListener(name, (ev) => { ev.preventDefault(); drop.classList.remove("over"); });
+    });
+    drop.addEventListener("drop", (ev) => {
+      const file = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      loadFile(file);
+    });
+
+    loadExamples();
+  </script>
+</body>
+</html>
