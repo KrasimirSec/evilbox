@@ -106,10 +106,15 @@ Still static: no JS/PHP engine.
 
 - Unescape string literals (`\xNN`, `\uNNNN`, octal, HTML entities)
 - Concatenate adjacent string literals (`+` in JS, `.` in PHP)
-- Fold simple numeric/boolean constants (`1+2`, `!0`) and JS bitwise ops
-- JS: `eval(atob(...))`, `unescape` / `decodeURIComponent`, `String.fromCharCode(...)` when arguments are literals; fold `name[i]` on constant arrays
+- Fold simple numeric/boolean constants (`1+2`, `!0`) and JS bitwise ops including `>>>`
+- JS: `eval(atob(...))`, `window["eval"]` / `eval.call`, `unescape` / `decodeURIComponent`, `String.fromCharCode` (including `String["fromCharCode"]` and `.apply`)
+- JS: string methods on literals (`charAt`, `concat`, `slice` / `substr`, `split`+`reverse`+`join`, `toLowerCase` / `toUpperCase`, `replace`)
+- JS: `parseInt` / `Number` / `String`, `(n).toString(radix)`, array `.join`, `Function("...")` / `new Function`
+- JS: fold one-shot `var s = "..."`, template strings with constant substitutions, and simple string-array + rotator + `return arr[i - offset]` decoders (javascript-obfuscator style)
 - PHP: `eval` / `assert` / `create_function` / `preg_replace /e` / `include`/`require` of decoded payloads
-- PHP: `base64_decode`, `gzinflate` / `gzuncompress` / `gzdecode`, `str_rot13`, `hex2bin`, `pack('H*', ...)`, string XOR, repeating-key `xor` / `rc4` when both arguments are constants, `chr` / `strtr` / `str_repeat`, `$arr[i]` folding
+- PHP: `base64_decode`, `gzinflate` / `gzuncompress` / `gzdecode`, `str_rot13`, `strrev`, `urldecode` / `rawurldecode`, `hex2bin`, `pack('H*', ...)`, `convert_uudecode`, `quoted_printable_decode`
+- PHP: string XOR, repeating-key `xor` / `rc4`, bitwise `~` on strings, `chr` / `ord` / `strtr` / `str_repeat` / `str_replace` / `substr` / `implode` / `sprintf` / case folds
+- PHP: `$arr[i]` folding, `$fn = 'base64_decode'; $fn(...)` when `$fn` is assigned once
 - Rename `_0x...` junk identifiers (and PHP `$` hex names of that form)
 
 Not included: control-flow flattening, VM/dispatcher unpackers, or running a JavaScript engine.

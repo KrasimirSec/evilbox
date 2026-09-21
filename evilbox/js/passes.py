@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from evilbox.decode import (
@@ -100,10 +100,36 @@ class Value:
     splice_raw: bool = False
 
 
+@dataclass
+class FoldEnv:
+    arrays: dict[str, list[Value]] = field(default_factory=dict)
+    scalars: dict[str, Value] = field(default_factory=dict)
+    decoders: dict[str, tuple[str, int]] = field(default_factory=dict)
+
+
+KNOWN_GLOBALS = {
+    "eval",
+    "atob",
+    "btoa",
+    "unescape",
+    "escape",
+    "decodeURIComponent",
+    "encodeURIComponent",
+    "decodeURI",
+    "encodeURI",
+    "parseInt",
+    "parseFloat",
+    "Number",
+    "String",
+    "Boolean",
+    "Function",
+}
+
+
 def transform_js(source: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     tree = parse_js(source)
-    env = collect_const_arrays(tree, source)
+    env = collect_env(tree, source)
     replacements: list[tuple[int, int, str]] = []
     for node in walk(tree.root_node):
         rendered = _render_if_simplified(node, source, env)
@@ -119,25 +145,144 @@ def transform_js(source: str) -> tuple[str, list[str]]:
 
 def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
     """Map `var name = [literals...]` so later `name[i]` can be folded."""
-    env: dict[str, list[Value]] = {}
+    return collect_env(tree, source).arrays
+
+
+def collect_env(tree, source: str) -> FoldEnv:
+    env = FoldEnv()
+    assign_count: dict[str, int] = {}
+    for node in walk(tree.root_node):
+        if node.type == "variable_declarator":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None and name_node.type == "identifier":
+                name = node_text(source, name_node)
+                assign_count[name] = assign_count.get(name, 0) + 1
+        elif node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                name = node_text(source, left)
+                assign_count[name] = assign_count.get(name, 0) + 1
+
     for node in walk(tree.root_node):
         if node.type != "variable_declarator":
             continue
         name_node = node.child_by_field_name("name")
         value = node.child_by_field_name("value")
-        if name_node is None or value is None or value.type != "array":
+        if name_node is None or value is None or name_node.type != "identifier":
             continue
-        elems: list[Value] = []
-        ok = True
-        for el in value.named_children:
-            item = _array_element(el, source)
-            if item is None:
-                ok = False
-                break
-            elems.append(item)
-        if ok and name_node.type == "identifier":
-            env[node_text(source, name_node)] = elems
+        name = node_text(source, name_node)
+        if assign_count.get(name, 0) != 1:
+            continue
+        if value.type == "array":
+            elems: list[Value] = []
+            ok = True
+            for el in value.named_children:
+                item = _array_element(el, source)
+                if item is None:
+                    ok = False
+                    break
+                elems.append(item)
+            if ok:
+                env.arrays[name] = elems
+            continue
+        if value.type == "identifier" and node_text(source, value) in KNOWN_GLOBALS:
+            env.scalars[name] = Value(node_text(source, value), splice_raw=True)
+            continue
+        item = const_eval(value, source, None)
+        if item is not None and not item.splice_raw:
+            env.scalars[name] = item
+
+    _rotate_string_arrays(tree, source, env)
+    _collect_array_decoders(tree, source, env)
     return env
+
+
+def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
+    for node in walk(tree.root_node):
+        if node.type != "call_expression":
+            continue
+        fn = node.child_by_field_name("function")
+        args = _call_args(node)
+        if fn is None or len(args) < 2:
+            continue
+        inner = fn
+        if inner.type == "parenthesized_expression" and inner.named_children:
+            inner = inner.named_children[0]
+        if inner.type not in {"function_expression", "arrow_function"}:
+            continue
+        if args[0].type != "identifier":
+            continue
+        arr_name = node_text(source, args[0])
+        if arr_name not in env.arrays:
+            continue
+        count_val = const_eval(args[1], source, env)
+        if count_val is None or not _is_num(count_val.py):
+            continue
+        n = int(count_val.py)
+        body = node_text(source, inner)
+        if "push" not in body or "shift" not in body:
+            continue
+        if re.search(r"\+\+\s*[A-Za-z_$]", body) and re.search(r"while\s*\(\s*--", body):
+            rot = n
+        elif re.search(r"while\s*\(\s*--", body):
+            rot = max(0, n - 1)
+        elif re.search(r"while\s*\(\s*[A-Za-z_$][\w$]*\s*--", body):
+            rot = n
+        else:
+            rot = n
+        items = env.arrays[arr_name]
+        if not items:
+            continue
+        rot %= len(items)
+        if rot:
+            env.arrays[arr_name] = items[rot:] + items[:rot]
+
+
+def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
+    for node in walk(tree.root_node):
+        if node.type not in {"function_declaration", "function_expression", "arrow_function"}:
+            continue
+        name = None
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                name = node_text(source, name_node)
+        text = node_text(source, node)
+        match = re.search(
+            r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,400}?"
+            r"(?:(?:\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,200})?"
+            r"return\s+([A-Za-z_$][\w$]*)\s*\[\s*\2(?:\s*-\s*(0x[0-9a-fA-F]+|\d+))?\s*\])",
+            text,
+            re.S | re.I,
+        )
+        if not match:
+            match = re.search(
+                r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,400}?"
+                r"\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,200}?"
+                r"return\s+([A-Za-z_$][\w$]*)\[",
+                text,
+                re.S | re.I,
+            )
+        if not match:
+            continue
+        func = name or match.group(1)
+        arr = match.group(4) if match.lastindex and match.lastindex >= 4 else None
+        offset_txt = match.group(3) or (match.group(5) if match.lastindex and match.lastindex >= 5 else "0")
+        if not arr or arr not in env.arrays:
+            # group numbers vary; hunt array name from body
+            found = re.findall(r"return\s+([A-Za-z_$][\w$]*)\s*\[", text)
+            arr = next((n for n in found if n in env.arrays), None)
+        if not func or not arr:
+            continue
+        try:
+            offset = int(offset_txt, 0) if offset_txt else 0
+        except ValueError:
+            offset = 0
+        if offset == 0:
+            off_match = re.search(r"=\s*[A-Za-z_$][\w$]*\s*-\s*(0x[0-9a-fA-F]+|\d+)", text)
+            if off_match:
+                offset = int(off_match.group(1), 0)
+        env.decoders[func] = (arr, offset)
 
 
 def _array_element(node, source: str) -> Value | None:
@@ -148,7 +293,7 @@ def _array_element(node, source: str) -> Value | None:
     return const_eval(node, source, env=None)
 
 
-def _render_if_simplified(node, source: str, env: dict[str, list[Value]] | None = None) -> str | None:
+def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str | None:
     if node.type in {"string", "string_fragment"}:
         if node.type == "string":
             return _simplified_string(node, source)
@@ -159,6 +304,8 @@ def _render_if_simplified(node, source: str, env: dict[str, list[Value]] | None 
         "parenthesized_expression",
         "call_expression",
         "subscript_expression",
+        "new_expression",
+        "template_string",
     }:
         val = const_eval(node, source, env)
         if val is None:
@@ -187,6 +334,9 @@ def _simplified_string(node, source: str) -> str | None:
 def _format_value(val: Value) -> str:
     if val.splice_raw and isinstance(val.py, str):
         return val.py
+    if isinstance(val.py, list):
+        parts = [_format_value(item if isinstance(item, Value) else Value(item)) for item in val.py]
+        return "[" + ", ".join(parts) + "]"
     if isinstance(val.py, str):
         return js_quote(val.py)
     if isinstance(val.py, bool):
@@ -198,7 +348,7 @@ def _format_value(val: Value) -> str:
     return js_quote(str(val.py))
 
 
-def const_eval(node, source: str, env: dict[str, list[Value]] | None = None) -> Value | None:
+def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
     t = node.type
     if t == "string":
         parsed = parse_quoted_string(node_text(source, node))
@@ -206,12 +356,7 @@ def const_eval(node, source: str, env: dict[str, list[Value]] | None = None) -> 
             return None
         return Value(unescape_html_entities(parsed))
     if t == "template_string":
-        if any(c.type == "template_substitution" for c in node.children):
-            return None
-        raw = node_text(source, node)
-        if len(raw) >= 2 and raw[0] == "`" and raw[-1] == "`":
-            return Value(unescape_js_string_body(raw[1:-1]))
-        return None
+        return _eval_template(node, source, env)
     if t == "number":
         return _parse_js_number(node_text(source, node))
     if t == "true":
@@ -221,6 +366,9 @@ def const_eval(node, source: str, env: dict[str, list[Value]] | None = None) -> 
     if t == "null":
         return Value(None)
     if t == "identifier" and env is not None:
+        name = node_text(source, node)
+        if name in env.scalars:
+            return env.scalars[name]
         return None
     if t == "parenthesized_expression":
         inner = node.named_children[0] if node.named_children else None
@@ -231,22 +379,64 @@ def const_eval(node, source: str, env: dict[str, list[Value]] | None = None) -> 
         return _eval_binary(node, source, env)
     if t == "call_expression":
         return _eval_call(node, source, env)
+    if t == "new_expression":
+        return _eval_new(node, source, env)
     if t == "subscript_expression":
         return _eval_subscript(node, source, env)
     if t == "array":
-        return None
+        elems: list[Value] = []
+        for el in node.named_children:
+            item = _array_element(el, source)
+            if item is None:
+                return None
+            elems.append(item)
+        return Value(elems)
     if t == "arguments":
         return None
     return None
 
 
-def _eval_subscript(node, source: str, env: dict[str, list[Value]] | None) -> Value | None:
+def _eval_template(node, source: str, env: FoldEnv | None) -> Value | None:
+    parts: list[str] = []
+    for child in node.children:
+        if child.type == "`":
+            continue
+        if child.type == "template_substitution":
+            inner = child.named_children[0] if child.named_children else None
+            if inner is None:
+                return None
+            val = const_eval(inner, source, env)
+            if val is None or val.splice_raw:
+                return None
+            if isinstance(val.py, bool):
+                parts.append("true" if val.py else "false")
+            elif val.py is None:
+                parts.append("null")
+            else:
+                parts.append(str(val.py))
+            continue
+        raw = node_text(source, child)
+        if child.type in {"string_fragment", "escape_sequence"}:
+            parts.append(unescape_js_string_body(raw))
+        elif raw not in {"`", "${", "}"}:
+            parts.append(unescape_js_string_body(raw))
+    return Value("".join(parts))
+
+
+def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     obj = node.child_by_field_name("object")
     index = node.child_by_field_name("index")
     if obj is None or index is None:
         return None
     idx_val = const_eval(index, source, env)
-    if idx_val is None or not isinstance(idx_val.py, int) or isinstance(idx_val.py, bool):
+    if idx_val is None:
+        return None
+    if isinstance(idx_val.py, str):
+        recv = const_eval(obj, source, env)
+        if recv is not None and isinstance(recv.py, str) and idx_val.py == "length":
+            return Value(len(recv.py))
+        return None
+    if not isinstance(idx_val.py, int) or isinstance(idx_val.py, bool):
         return None
     idx = idx_val.py
     elems: list[Value] | None = None
@@ -258,10 +448,22 @@ def _eval_subscript(node, source: str, env: dict[str, list[Value]] | None) -> Va
                 return None
             elems.append(item)
     elif obj.type == "identifier" and env is not None:
-        elems = env.get(node_text(source, obj))
-    if elems is None or idx < 0 or idx >= len(elems):
-        return None
-    return elems[idx]
+        elems = env.arrays.get(node_text(source, obj))
+    if elems is not None:
+        if idx < 0 or idx >= len(elems):
+            return None
+        return elems[idx]
+    recv = const_eval(obj, source, env)
+    if recv is not None and isinstance(recv.py, str):
+        if idx < 0:
+            idx += len(recv.py)
+        if 0 <= idx < len(recv.py):
+            return Value(recv.py[idx])
+    if recv is not None and isinstance(recv.py, list):
+        if 0 <= idx < len(recv.py):
+            item = recv.py[idx]
+            return item if isinstance(item, Value) else Value(item)
+    return None
 
 
 def _parse_js_number(text: str) -> Value | None:
@@ -283,7 +485,7 @@ def _parse_js_number(text: str) -> Value | None:
             return None
 
 
-def _eval_unary(node, source: str, env: dict[str, list[Value]] | None = None) -> Value | None:
+def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     op = None
     arg = None
     for child in node.children:
@@ -313,7 +515,7 @@ def _eval_unary(node, source: str, env: dict[str, list[Value]] | None = None) ->
     return None
 
 
-def _eval_binary(node, source: str, env: dict[str, list[Value]] | None = None) -> Value | None:
+def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     left = node.child_by_field_name("left")
     right = node.child_by_field_name("right")
     op_node = node.child_by_field_name("operator")
@@ -333,7 +535,7 @@ def _eval_binary(node, source: str, env: dict[str, list[Value]] | None = None) -
         return Value(lv.py + rv.py)
     if op == "+" and _is_num(lv.py) and _is_num(rv.py):
         return Value(lv.py + rv.py)
-    if op in {"^", "&", "|", "<<", ">>"} and _is_num(lv.py) and _is_num(rv.py):
+    if op in {"^", "&", "|", "<<", ">>", ">>>"} and _is_num(lv.py) and _is_num(rv.py):
         a, b = int(lv.py), int(rv.py)
         if op == "^":
             return Value(a ^ b)
@@ -342,7 +544,9 @@ def _eval_binary(node, source: str, env: dict[str, list[Value]] | None = None) -
         if op == "|":
             return Value(a | b)
         if op == "<<":
-            return Value(a << b)
+            return Value(a << (b & 31))
+        if op == ">>>":
+            return Value((a & 0xFFFFFFFF) >> (b & 31))
         return Value(a >> b)
     if op in {"-", "*", "/", "%"} and _is_num(lv.py) and _is_num(rv.py):
         try:
@@ -368,23 +572,6 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not (isinstance(value, float) and math.isnan(value))
 
 
-def _call_name(node, source: str) -> tuple[str | None, str | None]:
-    fn = node.child_by_field_name("function")
-    if fn is None and node.named_children:
-        fn = node.named_children[0]
-    if fn is None:
-        return None, None
-    if fn.type == "identifier":
-        return node_text(source, fn), None
-    if fn.type == "member_expression":
-        obj = fn.child_by_field_name("object")
-        prop = fn.child_by_field_name("property")
-        if obj is None or prop is None:
-            return None, None
-        return node_text(source, obj), node_text(source, prop)
-    return None, None
-
-
 def _call_args(node):
     args = node.child_by_field_name("arguments")
     if args is None:
@@ -397,8 +584,94 @@ def _call_args(node):
     return [c for c in args.named_children]
 
 
-def _eval_call(node, source: str, env: dict[str, list[Value]] | None = None) -> Value | None:
-    obj, prop = _call_name(node, source)
+def _callee(node, source: str, env: FoldEnv | None) -> tuple[str | None, str | None, Value | None]:
+    """Return (object_name, property_name, receiver_value)."""
+    fn = node.child_by_field_name("function")
+    if fn is None and node.named_children:
+        fn = node.named_children[0]
+    if fn is None:
+        return None, None, None
+    if fn.type == "identifier":
+        name = node_text(source, fn)
+        if env is not None and name in env.scalars and isinstance(env.scalars[name].py, str):
+            alias = env.scalars[name]
+            if alias.splice_raw or alias.py in KNOWN_GLOBALS:
+                return str(alias.py), None, None
+        return name, None, None
+    if fn.type == "member_expression":
+        obj = fn.child_by_field_name("object")
+        prop = fn.child_by_field_name("property")
+        if obj is None or prop is None:
+            return None, None, None
+        prop_name = node_text(source, prop)
+        recv = const_eval(obj, source, env)
+        obj_name = node_text(source, obj) if obj.type == "identifier" else None
+        if obj.type == "member_expression":
+            obj_name = node_text(source, obj)
+        return obj_name, prop_name, recv
+    if fn.type == "subscript_expression":
+        obj = fn.child_by_field_name("object")
+        index = fn.child_by_field_name("index")
+        if obj is None or index is None:
+            return None, None, None
+        idx = const_eval(index, source, env)
+        if idx is None or not isinstance(idx.py, str):
+            return None, None, None
+        recv = const_eval(obj, source, env)
+        obj_name = node_text(source, obj) if obj.type == "identifier" else None
+        return obj_name, idx.py, recv
+    return None, None, None
+
+
+def _from_char_code(values: list[Value]) -> Value | None:
+    chars: list[str] = []
+    for val in values:
+        if isinstance(val.py, list):
+            inner = _from_char_code([item if isinstance(item, Value) else Value(item) for item in val.py])
+            if inner is None:
+                return None
+            chars.append(inner.py)
+            continue
+        if not _is_num(val.py):
+            return None
+        chars.append(chr(int(val.py) & 0xFFFF))
+    return Value("".join(chars))
+
+
+def _js_int(value: Any, radix: int | None = None) -> int | None:
+    if _is_num(value):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            if radix:
+                return int(text, radix)
+            return int(text, 0) if text[:2].lower() in {"0x", "0o", "0b"} else int(text, 10)
+        except ValueError:
+            try:
+                return int(float(text))
+            except ValueError:
+                return None
+    return None
+
+
+def _eval_new(node, source: str, env: FoldEnv | None = None) -> Value | None:
+    ctor = node.child_by_field_name("constructor")
+    if ctor is None and node.named_children:
+        ctor = node.named_children[0]
+    if ctor is None:
+        return None
+    name = node_text(source, ctor) if ctor.type == "identifier" else None
+    if name == "Function":
+        args = _call_args(node)
+        values = [const_eval(arg, source, env) for arg in args]
+        if any(v is None or not isinstance(v.py, str) for v in values) or not values:
+            return None
+        return Value(values[-1].py, splice_raw=True)
+    return None
+
+
+def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     args = _call_args(node)
     values: list[Value] = []
     for arg in args:
@@ -407,22 +680,34 @@ def _eval_call(node, source: str, env: dict[str, list[Value]] | None = None) -> 
             return None
         values.append(val)
 
-    def str_arg(i: int = 0) -> str | None:
-        if i >= len(values) or not isinstance(values[i].py, str):
-            return None
-        return values[i].py
+    obj, prop, recv = _callee(node, source, env)
 
-    name = (prop or obj or "").lower() if obj else ""
-    callee = (obj or "").lower()
+    if env is not None and obj is not None and prop is None and obj in env.decoders:
+        arr_name, offset = env.decoders[obj]
+        items = env.arrays.get(arr_name) or []
+        raw_idx = values[0].py if values else None
+        idx = _js_int(raw_idx)
+        if idx is None:
+            return None
+        idx -= offset
+        if 0 <= idx < len(items):
+            return items[idx]
 
     if obj == "eval" and prop is None:
-        s = str_arg(0)
-        if s is None:
-            return None
-        return Value(s, splice_raw=True)
+        if values and isinstance(values[0].py, str):
+            return Value(values[0].py, splice_raw=True)
+        return None
+    if obj == "eval" and prop == "call" and len(values) >= 2 and isinstance(values[1].py, str):
+        return Value(values[1].py, splice_raw=True)
+    if obj in {"window", "globalThis", "self", "this"} and prop == "eval":
+        if values and isinstance(values[0].py, str):
+            return Value(values[0].py, splice_raw=True)
+        return None
 
-    if obj == "atob" and prop is None:
-        s = str_arg(0)
+    if (obj == "atob" and prop is None) or (
+        obj in {"window", "globalThis", "self", "this"} and prop == "atob"
+    ):
+        s = values[0].py if values and isinstance(values[0].py, str) else None
         if s is None:
             return None
         data = b64decode(s)
@@ -432,31 +717,159 @@ def _eval_call(node, source: str, env: dict[str, list[Value]] | None = None) -> 
         return Value(text) if text is not None else None
 
     if obj in {"unescape", "decodeURIComponent", "decodeURI"} and prop is None:
-        s = str_arg(0)
+        s = values[0].py if values and isinstance(values[0].py, str) else None
         if s is None:
             return None
         decoded = percent_decode(s)
         return Value(decoded if decoded is not None else s)
 
-    if (obj == "String" and prop == "fromCharCode") or (obj == "fromCharCode"):
-        chars: list[str] = []
-        for val in values:
-            if not _is_num(val.py):
-                return None
-            chars.append(chr(int(val.py) & 0xFFFF))
-        return Value("".join(chars))
+    if obj == "Function" and prop is None:
+        if values and isinstance(values[-1].py, str):
+            return Value(values[-1].py, splice_raw=True)
+        return None
 
-    if callee == "string" and (prop or "") == "fromCharCode":
-        chars = []
-        for val in values:
-            if not _is_num(val.py):
+    if obj == "parseInt" and prop is None and values:
+        radix = _js_int(values[1].py) if len(values) > 1 else None
+        parsed = _js_int(values[0].py, radix)
+        return Value(parsed) if parsed is not None else None
+    if obj == "Number" and prop is None and values:
+        parsed = _js_int(values[0].py)
+        if parsed is not None:
+            return Value(parsed)
+        if isinstance(values[0].py, str):
+            try:
+                return Value(float(values[0].py))
+            except ValueError:
                 return None
-            chars.append(chr(int(val.py) & 0xFFFF))
-        return Value("".join(chars))
+        return None
+    if obj == "String" and prop is None and values:
+        py = values[0].py
+        if isinstance(py, bool):
+            return Value("true" if py else "false")
+        if py is None:
+            return Value("null")
+        return Value(str(py))
 
-    # eval(atob(...)) already handled by evaluating inner call then eval.
-    # String.fromCharCode via computed member not supported.
-    _ = name
+    from_cc = (
+        (obj == "String" and prop == "fromCharCode")
+        or (obj == "fromCharCode" and prop is None)
+        or (isinstance(obj, str) and obj.endswith("fromCharCode") and prop == "apply")
+        or (obj == "String" and prop == "fromCharCode")
+    )
+    if obj == "String" and prop == "fromCharCode":
+        return _from_char_code(values)
+    if obj is not None and obj.endswith(".fromCharCode") and prop == "apply":
+        seq = values[1:] if values else []
+        flat: list[Value] = []
+        for item in seq:
+            if isinstance(item.py, list):
+                flat.extend(x if isinstance(x, Value) else Value(x) for x in item.py)
+            else:
+                flat.append(item)
+        return _from_char_code(flat)
+    if from_cc and prop is None:
+        return _from_char_code(values)
+
+    if recv is not None:
+        methoded = _eval_method(recv, prop or "", values)
+        if methoded is not None:
+            return methoded
+    _ = from_cc
+    return None
+
+
+def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
+    name = prop
+    py = recv.py
+    if isinstance(py, str):
+        if name == "charAt" and values and _is_num(values[0].py):
+            i = int(values[0].py)
+            return Value(py[i] if 0 <= i < len(py) else "")
+        if name == "charCodeAt" and values and _is_num(values[0].py):
+            i = int(values[0].py)
+            if 0 <= i < len(py):
+                return Value(ord(py[i]))
+            return None
+        if name == "concat":
+            out = py
+            for val in values:
+                if isinstance(val.py, (str, int, float)) and not isinstance(val.py, bool):
+                    out += str(val.py)
+                elif isinstance(val.py, str):
+                    out += val.py
+                else:
+                    return None
+            return Value(out)
+        if name in {"slice", "substring", "substr"}:
+            if not values or not _is_num(values[0].py):
+                return None
+            start = int(values[0].py)
+            end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
+            if name == "substr":
+                if start < 0:
+                    start = max(len(py) + start, 0)
+                length = end
+                return Value(py[start:] if length is None else py[start : start + length])
+            return Value(py[start:end])
+        if name == "split":
+            sep = values[0].py if values and isinstance(values[0].py, str) else None
+            if sep is None:
+                return None
+            if len(py) > 500_000:
+                return None
+            parts = list(py) if sep == "" else py.split(sep)
+            return Value([Value(p) for p in parts])
+        if name == "replace" and len(values) >= 2 and isinstance(values[0].py, str) and isinstance(values[1].py, str):
+            return Value(py.replace(values[0].py, values[1].py, 1))
+        if name == "replaceAll" and len(values) >= 2 and isinstance(values[0].py, str) and isinstance(values[1].py, str):
+            return Value(py.replace(values[0].py, values[1].py))
+        if name == "toLowerCase":
+            return Value(py.lower())
+        if name == "toUpperCase":
+            return Value(py.upper())
+        if name == "indexOf" and values and isinstance(values[0].py, str):
+            return Value(py.find(values[0].py))
+        if name == "repeat" and values and _is_num(values[0].py):
+            n = int(values[0].py)
+            if n < 0 or n * len(py) > 2_000_000:
+                return None
+            return Value(py * n)
+    if isinstance(py, list):
+        items = [x.py if isinstance(x, Value) else x for x in py]
+        if name == "join":
+            sep = values[0].py if values and isinstance(values[0].py, str) else ","
+            return Value(sep.join("" if v is None else str(v) for v in items))
+        if name == "reverse":
+            return Value(list(reversed(py)))
+        if name == "concat":
+            out = list(py)
+            for val in values:
+                if isinstance(val.py, list):
+                    out.extend(val.py)
+                else:
+                    out.append(val)
+            return Value(out)
+        if name == "slice" and values and _is_num(values[0].py):
+            start = int(values[0].py)
+            end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
+            return Value(py[start:end])
+    if _is_num(py) and name == "toString":
+        radix = int(values[0].py) if values and _is_num(values[0].py) else 10
+        if radix < 2 or radix > 36:
+            return None
+        n = int(py)
+        if radix == 10:
+            return Value(str(n))
+        chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+        if n == 0:
+            return Value("0")
+        sign = "-" if n < 0 else ""
+        n = abs(n)
+        out = []
+        while n:
+            n, rem = divmod(n, radix)
+            out.append(chars[rem])
+        return Value(sign + "".join(reversed(out)))
     return None
 
 
