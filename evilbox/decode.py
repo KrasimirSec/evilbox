@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import codecs
 import gzip
 import html
+import quopri
 import re
 import zlib
 
@@ -170,6 +172,68 @@ def percent_decode(text: str) -> str | None:
         return _percent_decode(text)
     except Exception:
         return None
+
+
+def php_urldecode(text: str) -> str:
+    return _percent_decode(text.replace("+", " "))
+
+
+def php_bitwise_not(text: str) -> str:
+    data = text.encode("latin-1", errors="replace")
+    return bytes((~b) & 0xFF for b in data).decode("latin-1")
+
+
+def quoted_printable_decode(text: str) -> str | None:
+    try:
+        return quopri.decodestring(text, header=False).decode("latin-1")
+    except Exception:
+        return None
+
+
+def uudecode(text: str) -> bytes | None:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out = bytearray()
+    for line in lines:
+        if not line or line.startswith("begin ") or line.strip() == "end":
+            continue
+        padded = line if len(line) >= 1 else ""
+        try:
+            out.extend(binascii.a2b_uu(padded))
+            continue
+        except binascii.Error:
+            pass
+        try:
+            out.extend(binascii.a2b_uu(padded + " " * 36))
+        except Exception:
+            return None
+    return bytes(out) if out else None
+
+
+def stripslashes(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def php_substr(text: str, start: int, length: int | None = None) -> str:
+    n = len(text)
+    if start < 0:
+        start = max(n + start, 0)
+    if length is None:
+        return text[start:]
+    if length < 0:
+        end = n + length
+        if end <= start:
+            return ""
+        return text[start:end]
+    return text[start : start + length]
 
 
 def _percent_decode(text: str) -> str:
