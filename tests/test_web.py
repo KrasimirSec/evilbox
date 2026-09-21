@@ -151,3 +151,14 @@ def test_get_decode_is_method_not_allowed(web_url):
     with pytest.raises(HTTPError) as exc:
         urlopen(req, timeout=10)
     assert exc.value.code == 405
+
+
+def test_decode_timeout_uses_subprocess():
+    import inspect
+
+    from evilbox import web
+
+    source = inspect.getsource(web._decode_with_timeout)
+    assert "Popen" in source
+    assert "SIGKILL" in source
+    assert "DECODE_TIMEOUT" in source

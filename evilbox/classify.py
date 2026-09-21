@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from evilbox.hashutil import sha256_text
+from evilbox.hashutil import minhash_hex, minhash_jaccard, minhash_values, sha256_text
 
 
 @dataclass
@@ -140,3 +140,36 @@ def cluster_key(inner_text: str) -> str:
     from evilbox.hashutil import normalize_code
 
     return sha256_text(normalize_code(inner_text))
+
+
+def cluster_minhash(inner_text: str) -> str:
+    return minhash_hex(inner_text)
+
+
+def cluster_similar(left: str, right: str, *, threshold: float = 0.55) -> bool:
+    return minhash_jaccard(minhash_values(left), minhash_values(right)) >= threshold
+
+
+def cluster_groups(samples: list[tuple[str, str]], *, threshold: float = 0.55) -> dict[str, list[str]]:
+    """Fuzzy groups: (path, inner_text) -> representative minhash -> paths."""
+    sigs = [(path, minhash_values(text)) for path, text in samples]
+    parent = list(range(len(sigs)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(sigs)):
+        for j in range(i + 1, len(sigs)):
+            if minhash_jaccard(sigs[i][1], sigs[j][1]) >= threshold:
+                a, b = find(i), find(j)
+                if a != b:
+                    parent[b] = a
+    groups: dict[str, list[str]] = {}
+    for i, (path, _values) in enumerate(sigs):
+        root = find(i)
+        key = minhash_hex(samples[root][1])
+        groups.setdefault(key, []).append(path)
+    return groups

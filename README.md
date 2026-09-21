@@ -43,16 +43,18 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--report PATH` | JSON report (`evilbox.report.v1`) |
 | `--html PATH` | HTML report |
 | `--max-passes N` | Unwrap/fold iterations (default: 16) |
+| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image (default: 8.3) |
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
+| `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape inside the sandbox |
 | `--logs-dir PATH` | Sandbox log root (default: `EVILBOX_LOGS` or `./sandbox-logs`) |
 | `--timeout N` | Sandbox PHP timeout in seconds (default: 15) |
 | `serve` | Local web UI + JSON API for paste/upload decoding |
 
-If the input is a directory, Evilbox walks `.js` / `.php` files, writes `*.clean.*` plus `*.report.json`, and a `clusters.json` map of similar inner-layer hashes.
+If the input is a directory, Evilbox walks `.js` / `.php` files, writes `*.clean.*` plus `*.report.json`, and a `clusters.json` map of similar inner layers (token n-gram minhash, so a changed domain or key still groups a family). `cluster_sha256` remains an exact whitespace-normalized hash of the inner text.
 
 `-o clean.js` also writes `clean.iocs.json` and `clean.report.json` unless `--report` is set.
 
-Exit status `1` means the result still does not parse cleanly; the best-effort output is still written. Missing files, permission problems, and other failures print a short `error:` line (exit `2`) instead of a traceback. Set `EVILBOX_DEBUG=1` if you need the full stack.
+Exit status `1` means the result still does not parse cleanly **or** decoder folds remain unresolved on the inner layer (for example a leftover `gzinflate` or a recovered `convert_uudecode`). The best-effort output is still written. Missing files, permission problems, and other failures print a short `error:` line (exit `2`) instead of a traceback. Set `EVILBOX_DEBUG=1` if you need the full stack.
 
 ## Web decoder
 
@@ -87,7 +89,7 @@ curl --data-binary @packed.php -H 'Content-Type: text/plain' \
   'http://127.0.0.1:8080/api/decode?lang=php&filename=packed.php'
 ```
 
-The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`).
+The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). The timeout is enforced by killing a **subprocess** (a worker thread cannot interrupt a catastrophic regex).
 
 The no-argument menu also has **Open the web decoder**.
 
@@ -116,14 +118,18 @@ These are static (and sandbox-augmented) rules, not AV family names. Treat score
 
 JSON schema id: `evilbox.report.v1`. Fields include:
 
-- **sample** — path, language, SHA-256 of the original file, SHA-256 of the inner layer, `cluster_sha256` (whitespace-normalized inner code for clustering)
+- **sample** — path, language, SHA-256 of the original file, SHA-256 of the inner layer, `cluster_sha256` (exact normalized inner code), `cluster_minhash` (structure minhash for fuzzy families)
 - **packer** — hints such as `eval+base64`, `fromCharCode`, `preg_replace/e`
-- **layers** — original → unwrap passes → inner (sandbox eval dumps are their own layer)
+- **layers** — original → unwrap passes → inner (sandbox eval dumps are their own layer). Each layer lists `unresolved_folds`
+- **unresolved_folds** — decoder/packer/dispatch calls that did not simplify, grouped per layer; remote loader URLs are unresolved stages
+- **encoded_not_analyzable** — ionCube, Zend Guard, or SourceGuardian headers (`encoded, not analyzable`)
+- **failed_folds** — true when the inner layer still has decoder/packer leftovers
 - **roles** / **capabilities** — with evidence snippets
 - **indicators** — URLs, domains, IPs, emails, files, paths, registry, APIs
 - **indicators_by_layer** — the same IOCs tagged with the layer they appeared in
-- **surface_signatures** — YARA-oriented needles from the **original** file only
-- **sandbox** — present when `--sandbox` was used (log dir, DNS hosts, HTTP, eval dump names)
+- **surface_signatures** — full YARA rule plus PCRE needles from the **original** file only
+- **sandbox** — present when `--sandbox` was used (log dir, DNS hosts, HTTP, eval dump names, php version, request profile)
+- **sandbox_cross_check** — static inner layer vs sandbox eval-dump layer; disagreements are flagged
 
 `--html` is the same data as a simple HTML page.
 
@@ -138,7 +144,7 @@ From the original layer only, Evilbox collects:
 - Stable variable and function names that are not `_0x…` junk
 - Distinctive comments
 
-Each item has `kind`, `value`, a `yara` needle, and a short `why`.
+Each item has `kind`, `value`, a `yara` needle, a `pcre` pattern, and a short `why`. The report also includes a complete YARA `rule` (`yara_rule`) whose strings are those needles. Those rules are tested against a small clean WordPress plugin/theme corpus under `tests/corpus/wordpress_benign/`.
 
 ## Unpacking
 
@@ -162,22 +168,31 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 
 **Dynamic execution (static splice when the callback and payload are constants)**
 
-- PHP: `eval`, `assert`, `create_function`, `preg_replace /e`, `call_user_func` / `call_user_func_array`, `register_shutdown_function`, variable functions, variable variables (`$$a`), `array_map('base64_decode', ...)`
-- JS: `Function` / `new Function`, `setTimeout` / `setInterval` with a string, `eval.call`, computed `window['atob']`
+- PHP: `eval`, `assert`, `create_function`, `preg_replace /e`, `call_user_func` / `call_user_func_array`, `register_shutdown_function`, `ob_start`, `array_map` / `array_filter` / `array_walk` / `usort`, variable functions, variable variables (`$$a`), function names stored in arrays
+- JS: `Function` / `new Function`, `setTimeout` / `setInterval` with a string, `eval.call`, computed `window['atob']`. Leftover Dean Edwards / JSFuck / JJEncode / AAEncode and `setTimeout("...")` are reported as unresolved stages. Remote loader URLs (pastebin, GitHub, Telegram, CDN, …) are unresolved stages, not decoded.
 
 **Layout and junk**
 
 - Collapse huge blank-line / space runs
 - Extract `__halt_compiler()` trailers (hex / base64 / zlib when they decode)
+- Fold `file_get_contents(__FILE__)` / `__DIR__` sibling payloads when the extra file is next to the sample
 - Rename `_0x…`, lookalike `O0Il` names, long underscore names, and non-ASCII identifier homoglyphs
 
-**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file; EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers.
+**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample; EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
+
+`gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 8 MiB.
+
+Codecs that model PHP strings (`~`, XOR, `stripslashes`) treat values as bytes. Characters above U+00FF are an error, not replaced with `?`. `convert_uudecode` line-padding retries are marked **recovered**. `substr` past the end of the string follows the selected `--php-version` (empty string on PHP 8, `false` on PHP 5/7).
 
 Not included: running a JavaScript or PHP engine over HTTP. The optional Docker sandbox remains CLI-only.
 
 ## PHP sandbox (evalhook, no real internet)
 
-Optional Docker lab for packed PHP. Each run **builds a throwaway image tag, starts a new container with `--network none`, then deletes the container and image tag**. The sample is mounted read-only. Nothing from the run is committed back into an image.
+Optional Docker lab for packed PHP. Each run **builds a throwaway image tag, starts a new container with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`, then deletes the container and image tag**. Docker’s default seccomp profile stays enabled. The sample is mounted read-only. Nothing from the run is committed back into an image.
+
+`--php-version 8.3` (default), `7.4`, or `5.6` selects the Dockerfile. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
+
+`--sandbox-profile` sets the request the sample sees: `googlebot` (Googlebot UA), `google-referrer`, or `wp-cookie` (WordPress login cookies). WordPress function stubs are prepended. `sleep` / `usleep` / `nanosleep` are hooked to return immediately (LD_PRELOAD, PHP process only).
 
 Inside the container:
 

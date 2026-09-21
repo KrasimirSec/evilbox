@@ -2,19 +2,27 @@
 
 #include "php.h"
 #include "ext/standard/info.h"
+#include <string.h>
 
 
 #define EVAL_CALLBACK_FUNCTION  "__eval"
 
 static const char module_name[] = "evalhook";
 
+#if PHP_VERSION_ID >= 80000
 static zend_op_array* (*old_compile_string)(zend_string *, const char *, zend_compile_position);
-
 
 static zend_op_array* evalhook_compile_string(
 		zend_string *source_string,
 		const char *filename,
 		zend_compile_position pos)
+#else
+static zend_op_array* (*old_compile_string)(zend_string *, const char *);
+
+static zend_op_array* evalhook_compile_string(
+		zend_string *source_string,
+		const char *filename)
+#endif
 {
 	zend_op_array *op_array = NULL;
 	int op_compiled = 0;
@@ -32,7 +40,11 @@ static zend_op_array* evalhook_compile_string(
 			if(call_user_function(CG(function_table), NULL, &function, &retval, 2, parameter) == SUCCESS) {
 				switch(Z_TYPE(retval)) {
 					case IS_STRING:
+#if PHP_VERSION_ID >= 80000
 						op_array = old_compile_string(Z_STR(retval), filename, pos);
+#else
+						op_array = old_compile_string(Z_STR(retval), filename);
+#endif
 					case IS_FALSE:
 						op_compiled = 1;
 						break;
@@ -48,7 +60,11 @@ static zend_op_array* evalhook_compile_string(
 	if(op_compiled) {
 		return op_array;
 	} else {
+#if PHP_VERSION_ID >= 80000
 		return old_compile_string(source_string, filename, pos);
+#else
+		return old_compile_string(source_string, filename);
+#endif
 	}
 }
 
@@ -69,7 +85,13 @@ ZEND_NAMED_FUNCTION(evalhook_extension_loaded)
 		Z_PARAM_STR(module)
 	ZEND_PARSE_PARAMETERS_END();
 
-	if (zend_string_equals_cstr(module, module_name, sizeof module_name) == 0) {
+	if (
+#if PHP_VERSION_ID >= 80000
+		zend_string_equals_cstr(module, module_name, sizeof module_name) == 0
+#else
+		ZSTR_LEN(module) == strlen(module_name) && strcmp(ZSTR_VAL(module), module_name) == 0
+#endif
+	) {
 		RETURN_FALSE;
 	}
 

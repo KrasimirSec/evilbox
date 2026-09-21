@@ -7,6 +7,10 @@ def test_sandbox_dockerfile_present():
     context = sandbox_context_dir()
     assert (context / "Dockerfile").is_file()
     assert (context / "entrypoint.sh").is_file()
+    assert (context / "Dockerfile.7.4").is_file()
+    assert (context / "Dockerfile.5.6").is_file()
+    assert (context / "wp-stubs.php").is_file()
+    assert (context / "sleep_hook.c").is_file()
     text = (context / "Dockerfile").read_text(encoding="utf-8")
     assert "git clone" not in text
     assert "vendor/php-eval-hook" in text
@@ -32,9 +36,15 @@ def test_docker_run_is_isolated(tmp_path):
     assert "--network" in args
     assert args[args.index("--network") + 1] == "none"
     assert "--rm" in args
+    assert "--cap-drop" in args
+    assert args[args.index("--cap-drop") + 1] == "ALL"
+    assert "--pids-limit" in args
+    assert "--memory" in args
     joined = " ".join(args)
     assert "readonly=true" in joined
     assert "SANDBOX_MODE=observe" in joined
+    assert "no-new-privileges" in joined
+    assert "seccomp=unconfined" not in joined
 
 
 def test_finalize_logs_collects_domains(tmp_path):

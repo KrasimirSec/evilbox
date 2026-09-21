@@ -14,6 +14,13 @@ from evilbox.pipeline import deobfuscate
 
 IMAGE_NAME = "evilbox-php-sandbox"
 QUERY_RE = re.compile(r"query\[[^\]]+\]\s+(\S+)", re.I)
+PHP_IMAGES = {
+    "8.3": IMAGE_NAME,
+    "8.0": IMAGE_NAME,
+    "7.4": IMAGE_NAME + "-7.4",
+    "5.6": IMAGE_NAME + "-5.6",
+}
+SANDBOX_PROFILES = ("default", "googlebot", "google-referrer", "wp-cookie")
 
 
 class SandboxError(RuntimeError):
@@ -45,15 +52,30 @@ def _run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedP
     return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
 
 
-def build_image(context: Path, tag: str) -> None:
-    proc = _run(
-        ["docker", "build", "-t", tag, str(context)],
-        timeout=600,
-    )
+def build_image(context: Path, tag: str, *, dockerfile: Path | None = None) -> None:
+    cmd = ["docker", "build", "-t", tag]
+    if dockerfile is not None:
+        cmd.extend(["-f", str(dockerfile)])
+    cmd.append(str(context))
+    proc = _run(cmd, timeout=600)
     if proc.returncode != 0:
         raise SandboxError(
             "docker build failed:\n" + (proc.stderr or proc.stdout or "no output")
         )
+
+
+def sandbox_dockerfile(php_version: str = "8.3") -> Path:
+    context = sandbox_context_dir()
+    major = php_version.split(".")[0]
+    if php_version.startswith("5.6") or major == "5":
+        candidate = context / "Dockerfile.5.6"
+        if candidate.is_file():
+            return candidate
+    if php_version.startswith("7.4") or php_version.startswith("7."):
+        candidate = context / "Dockerfile.7.4"
+        if candidate.is_file():
+            return candidate
+    return context / "Dockerfile"
 
 
 def docker_run_args(
@@ -64,7 +86,11 @@ def docker_run_args(
     mode: str,
     timeout: int,
     container_name: str,
+    profile: str = "default",
+    php_version: str = "8.3",
 ) -> list[str]:
+    if profile not in SANDBOX_PROFILES:
+        profile = "default"
     return [
         "docker",
         "run",
@@ -75,16 +101,26 @@ def docker_run_args(
         "none",
         "--memory",
         "512m",
+        "--memory-swap",
+        "512m",
         "--cpus",
         "1",
         "--pids-limit",
         "128",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
         "--env",
         f"SANDBOX_MODE={mode}",
         "--env",
         f"SANDBOX_TIMEOUT={timeout}",
         "--env",
         "SANDBOX_LOGS=/logs",
+        "--env",
+        f"SANDBOX_PROFILE={profile}",
+        "--env",
+        f"SANDBOX_PHP_VERSION={php_version}",
         "--mount",
         f"type=bind,src={sample},dst=/samples/sample.php,readonly=true",
         "--mount",
@@ -169,6 +205,8 @@ def run_php_sandbox(
     mode: str,
     logs_root: Path,
     timeout: int = 15,
+    php_version: str = "8.3",
+    profile: str = "default",
 ) -> SandboxResult:
     if shutil.which("docker") is None:
         raise SandboxError("docker is not installed or not on PATH.")
@@ -180,13 +218,14 @@ def run_php_sandbox(
         raise SandboxError(f"sample not found: {sample}")
 
     context = sandbox_context_dir()
+    dockerfile = sandbox_dockerfile(php_version)
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     tag = f"{IMAGE_NAME}:{run_id}"
     container_name = f"evilbox-{run_id}"
     log_dir = (logs_root / run_id).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    build_image(context, tag)
+    build_image(context, tag, dockerfile=dockerfile)
     args = docker_run_args(
         tag=tag,
         sample=sample,
@@ -194,6 +233,8 @@ def run_php_sandbox(
         mode=mode,
         timeout=timeout,
         container_name=container_name,
+        profile=profile,
+        php_version=php_version,
     )
     host_timeout = timeout + 90
     proc: subprocess.CompletedProcess[str] | None = None
@@ -220,9 +261,17 @@ def run_php_sandbox(
     domains, dumps = finalize_logs(log_dir)
     original = sample.read_text(encoding="utf-8", errors="replace")
     source = _best_source(sample, dumps)
-    cleaned = deobfuscate(source, language="php", path=str(sample), surface_text=original)
+    static = deobfuscate(original, language="php", path=str(sample), php_version=php_version)
+    cleaned = deobfuscate(source, language="php", path=str(sample), surface_text=original, php_version=php_version)
+    from evilbox.pipeline import cross_check_layers
+
+    cross = cross_check_layers(original_inner=static.text, dump_text=source, static_text=cleaned.text)
+    if not cross["agree"]:
+        cleaned.warnings.append("static inner disagrees with sandbox dump layer")
+    cleaned.sandbox_cross_check = cross
     http = collect_http(log_dir)
     (log_dir / "deobfuscated.php").write_text(cleaned.text, encoding="utf-8")
+    (log_dir / "cross-check.json").write_text(json.dumps(cross, indent=2) + "\n", encoding="utf-8")
     if timed_out:
         raise SandboxError(f"sandbox timed out after {host_timeout}s; logs kept at {log_dir}")
     return SandboxResult(

@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from email.parser import BytesParser
 from email.policy import HTTP as HTTP_POLICY
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,8 +32,16 @@ DEFAULT_PASSES = 16
 MAX_CONCURRENT = 4
 INDEX_PATH = Path(__file__).with_name("web_index.html")
 
-_DECODE_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="evilbox-decode")
 _SLOT = threading.BoundedSemaphore(MAX_CONCURRENT)
+_WORKER = (
+    "import json,sys; from evilbox.web import decode_payload, WebError;\n"
+    "payload=json.load(sys.stdin)\n"
+    "try:\n"
+    "    json.dump(decode_payload(**payload), sys.stdout)\n"
+    "except WebError as exc:\n"
+    "    json.dump({'__web_error': True, 'message': exc.message, 'status': exc.status}, sys.stdout)\n"
+    "    sys.exit(2)\n"
+)
 
 EXAMPLES: list[dict[str, str]] = [
     {
@@ -118,11 +127,29 @@ def _decode_with_timeout(kwargs: dict[str, Any]) -> dict[str, Any]:
     if not _SLOT.acquire(timeout=DECODE_TIMEOUT):
         raise WebError("decoder is busy; try again shortly", 503)
     try:
-        future = _DECODE_POOL.submit(decode_payload, **kwargs)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _WORKER],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
         try:
-            return future.result(timeout=DECODE_TIMEOUT)
-        except FuturesTimeout as exc:
+            out, err = proc.communicate(json.dumps(kwargs).encode("utf-8"), timeout=DECODE_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
             raise WebError("decode timed out", 504) from exc
+        if not out:
+            detail = (err or b"").decode("utf-8", errors="replace")[:200]
+            raise WebError(f"decode worker failed{': ' + detail if detail else ''}", 500)
+        payload = json.loads(out.decode("utf-8"))
+        if isinstance(payload, dict) and payload.get("__web_error"):
+            raise WebError(str(payload.get("message") or "decode failed"), int(payload.get("status") or 400))
+        return payload
     finally:
         _SLOT.release()
 

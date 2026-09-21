@@ -101,6 +101,27 @@ COMMON = {
     "head",
     "script",
     "style",
+    "wpdb",
+    "wp_query",
+    "wp_scripts",
+    "wp_styles",
+    "wp_mail",
+    "wp_enqueue_script",
+    "wp_enqueue_style",
+    "add_action",
+    "add_filter",
+    "get_option",
+    "update_option",
+    "is_admin",
+    "abspath",
+    "plugin_dir_url",
+    "plugins_url",
+    "get_header",
+    "get_footer",
+    "the_content",
+    "post_title",
+    "post_id",
+    "get_template_directory",
 }
 
 
@@ -109,22 +130,60 @@ class SurfaceItem:
     kind: str
     value: str
     yara: str
+    pcre: str
     why: str
 
     def to_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "value": self.value, "yara": self.yara, "why": self.why}
+        return {
+            "kind": self.kind,
+            "value": self.value,
+            "yara": self.yara,
+            "pcre": self.pcre,
+            "why": self.why,
+        }
 
 
 @dataclass
 class SurfaceSignatures:
     items: list[SurfaceItem] = field(default_factory=list)
+    yara_rule: str = ""
 
     def to_dict(self) -> dict:
-        return {"layer": "original", "items": [i.to_dict() for i in self.items]}
+        return {
+            "layer": "original",
+            "items": [i.to_dict() for i in self.items],
+            "yara_rule": self.yara_rule,
+        }
 
 
 def yara_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+
+
+def pcre_escape(text: str) -> str:
+    return re.escape(text)
+
+
+def render_yara_rule(items: list[SurfaceItem], *, rule_name: str = "evilbox_surface") -> str:
+    ident = re.sub(r"[^A-Za-z0-9_]", "_", rule_name) or "evilbox_surface"
+    if ident[0].isdigit():
+        ident = "r_" + ident
+    lines = [
+        f"rule {ident}",
+        "{",
+        "  meta:",
+        '    tool = "evilbox"',
+        '    layer = "original"',
+        "  strings:",
+    ]
+    if not items:
+        lines.append('    $empty = "evilbox-no-surface-needles" ascii')
+        lines.extend(["  condition:", "    false", "}"])
+        return "\n".join(lines) + "\n"
+    for index, item in enumerate(items):
+        lines.append(f'    $s{index} = "{item.yara}" ascii wide nocase')
+    lines.extend(["  condition:", "    any of them", "}"])
+    return "\n".join(lines) + "\n"
 
 
 def _needle(text: str, size: int = 32) -> str:
@@ -171,6 +230,7 @@ def extract_surface(source: str, *, language: str) -> SurfaceSignatures:
                 kind=kind,
                 value=key[:400],
                 yara=yara_escape(needle),
+                pcre=pcre_escape(needle),
                 why=why,
             )
         )
@@ -234,4 +294,5 @@ def extract_surface(source: str, *, language: str) -> SurfaceSignatures:
         return (kind_rank, -len(item.value))
 
     items.sort(key=rank)
-    return SurfaceSignatures(items=items[:36])
+    chosen = items[:36]
+    return SurfaceSignatures(items=chosen, yara_rule=render_yara_rule(chosen))

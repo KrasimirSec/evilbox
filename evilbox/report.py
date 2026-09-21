@@ -19,17 +19,23 @@ def build_report(
             "sha256": result.original_sha256,
             "inner_sha256": result.inner_sha256,
             "cluster_sha256": result.cluster_sha256,
+            "cluster_minhash": getattr(result, "cluster_minhash", ""),
+            "php_version": getattr(result, "php_version", None),
         },
         "packer": result.packer,
         "parse_ok": result.parse_ok,
+        "failed_folds": getattr(result, "failed_folds", False),
         "warnings": result.warnings,
         "layers": [layer.to_dict() for layer in result.layers],
+        "unresolved_folds": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(result, "unresolved_folds", [])],
+        "encoded_not_analyzable": getattr(result, "encoded_not_analyzable", []),
         "roles": [r.to_dict() for r in result.classification.roles],
         "capabilities": [c.to_dict() for c in result.classification.capabilities],
         "indicators": result.indicators.to_dict(),
         "indicators_by_layer": result.indicators_by_layer,
         "surface_signatures": result.surface.to_dict(),
         "sandbox": sandbox,
+        "sandbox_cross_check": (sandbox or {}).get("cross_check") if sandbox else getattr(result, "sandbox_cross_check", None),
     }
     return report
 
@@ -54,6 +60,26 @@ def format_analysis(report: dict[str, Any]) -> str:
     sample = report.get("sample") or {}
     if sample.get("cluster_sha256"):
         lines.append(f"cluster: {sample['cluster_sha256']}")
+    if sample.get("cluster_minhash"):
+        lines.append(f"cluster_minhash: {sample['cluster_minhash']}")
+    if report.get("failed_folds"):
+        lines.append("failed_folds: yes")
+    unresolved = report.get("unresolved_folds") or []
+    if unresolved:
+        lines.append("unresolved folds:")
+        by_layer: dict[str, int] = {}
+        for item in unresolved:
+            by_layer[item.get("layer", "?")] = by_layer.get(item.get("layer", "?"), 0) + 1
+        for layer_name, count in by_layer.items():
+            lines.append(f"  {layer_name}: {count}")
+        for item in unresolved[:12]:
+            lines.append(f"  [{item.get('layer')}] {item.get('kind')} {item.get('callee')}: {item.get('reason')}")
+    encoded = report.get("encoded_not_analyzable") or []
+    if encoded:
+        lines.append("encoded, not analyzable: " + ", ".join(e.get("name", "") for e in encoded))
+    cross = report.get("sandbox_cross_check") or {}
+    if cross:
+        lines.append(f"sandbox cross-check: {cross.get('detail')}")
     surface = (report.get("surface_signatures") or {}).get("items") or []
     if surface:
         lines.append("surface signatures (original layer):")
@@ -79,12 +105,24 @@ def render_html(report: dict[str, Any]) -> str:
         f"<tr><td>{esc(row['layer'])}</td><td>{esc(row['kind'])}</td><td><code>{esc(row['value'])}</code></td></tr>"
         for row in report.get("indicators_by_layer") or []
     )
+    folds = "".join(
+        f"<tr><td>{esc(item.get('layer'))}</td><td>{esc(item.get('kind'))}</td>"
+        f"<td><code>{esc(item.get('callee'))}</code></td><td>{esc(item.get('reason'))}</td>"
+        f"<td><code>{esc(item.get('snippet'))}</code></td></tr>"
+        for item in report.get("unresolved_folds") or []
+    ) or "<tr><td colspan='5'>none</td></tr>"
+    warnings = "".join(f"<li>{esc(w)}</li>" for w in report.get("warnings") or []) or "<li>none</li>"
+    yara = esc((report.get("surface_signatures") or {}).get("yara_rule") or "")
     sample = report.get("sample") or {}
+    encoded = esc(", ".join(e.get("name", "") for e in report.get("encoded_not_analyzable") or []) or "none")
+    cross = report.get("sandbox_cross_check") or {}
+    cross_html = esc(cross.get("detail") or "")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Evilbox report</title>
 <style>
 body {{ font-family: sans-serif; margin: 1.5rem; color: #111; }}
 code {{ font-size: 0.9em; word-break: break-all; }}
+pre {{ white-space: pre-wrap; word-break: break-all; background: #f7f7f7; padding: 0.8rem; }}
 table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
 td, th {{ border: 1px solid #ccc; padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }}
 th {{ background: #f4f4f4; }}
@@ -94,12 +132,20 @@ th {{ background: #f4f4f4; }}
 language: {esc(sample.get("language"))}<br>
 sha256: <code>{esc(sample.get("sha256"))}</code><br>
 inner: <code>{esc(sample.get("inner_sha256"))}</code><br>
-cluster: <code>{esc(sample.get("cluster_sha256"))}</code></p>
-<p>packer: {esc(", ".join(report.get("packer") or []))}</p>
+cluster: <code>{esc(sample.get("cluster_sha256"))}</code><br>
+cluster minhash: <code>{esc(sample.get("cluster_minhash"))}</code></p>
+<p>packer: {esc(", ".join(report.get("packer") or []))}<br>
+encoded, not analyzable: {encoded}<br>
+failed folds: {esc(report.get("failed_folds"))}<br>
+sandbox cross-check: {cross_html}</p>
+<h2>Warnings</h2><ul>{warnings}</ul>
 <h2>Roles</h2><ul>{roles}</ul>
 <h2>Capabilities</h2><ul>{caps}</ul>
+<h2>Unresolved folds</h2>
+<table><tr><th>layer</th><th>kind</th><th>callee</th><th>why</th><th>snippet</th></tr>{folds}</table>
 <h2>Surface signatures (original layer)</h2>
 <table><tr><th>kind</th><th>YARA needle</th><th>why</th></tr>{surface}</table>
+<h2>YARA rule</h2><pre>{yara}</pre>
 <h2>Indicators by layer</h2>
 <table><tr><th>layer</th><th>kind</th><th>value</th></tr>{iocs}</table>
 </body></html>

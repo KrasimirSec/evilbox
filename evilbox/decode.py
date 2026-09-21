@@ -5,13 +5,16 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
-import gzip
 import html
 import quopri
 import re
 import zlib
+from dataclasses import dataclass
 
 _HEX_RE = re.compile(r"^[0-9a-fA-F\s]+$")
+
+# Cap decompressor output so a tiny gzinflate blob cannot fill memory.
+MAX_CODEC_OUTPUT = 8 * 1024 * 1024
 
 
 def b64decode(text: str) -> bytes | None:
@@ -92,27 +95,43 @@ def rot13(text: str) -> str:
     return codecs.decode(text, "rot_13")
 
 
-def gzip_bytes(data: bytes) -> bytes | None:
+def _decompress_limited(data: bytes, wbits: int, max_out: int = MAX_CODEC_OUTPUT) -> bytes | None:
     try:
-        return gzip.decompress(data)
-    except Exception:
+        obj = zlib.decompressobj(wbits)
+        out = obj.decompress(data, max_out)
+    except zlib.error:
         return None
+    if len(out) >= max_out and (obj.unconsumed_tail or not obj.eof):
+        return None
+    try:
+        tail = obj.flush()
+    except zlib.error:
+        return None
+    if tail:
+        if len(out) + len(tail) > max_out:
+            return None
+        out += tail
+    return out
+
+
+def gzip_bytes(data: bytes) -> bytes | None:
+    return _decompress_limited(data, 16 + zlib.MAX_WBITS)
 
 
 def bzip_bytes(data: bytes) -> bytes | None:
     try:
         import bz2
 
-        return bz2.decompress(data)
+        out = bz2.decompress(data, max_length=MAX_CODEC_OUTPUT)
     except Exception:
         return None
+    if len(out) >= MAX_CODEC_OUTPUT:
+        return None
+    return out
 
 
 def zlib_bytes(data: bytes) -> bytes | None:
-    try:
-        return zlib.decompress(data)
-    except zlib.error:
-        return None
+    return _decompress_limited(data, zlib.MAX_WBITS)
 
 
 # Stored inflate window (raw deflate+zlib header) for codec self-checks.
@@ -122,10 +141,7 @@ _ZRAW = bytes(
 
 
 def raw_inflate(data: bytes) -> bytes | None:
-    try:
-        return zlib.decompress(data, -15)
-    except zlib.error:
-        return None
+    return _decompress_limited(data, -15)
 
 
 def gzip_zlib_or_inflate(data: bytes) -> bytes | None:
@@ -133,10 +149,7 @@ def gzip_zlib_or_inflate(data: bytes) -> bytes | None:
         out = fn(data)
         if out is not None:
             return out
-    try:
-        return zlib.decompress(data, 32 + zlib.MAX_WBITS)
-    except zlib.error:
-        return None
+    return _decompress_limited(data, 32 + zlib.MAX_WBITS)
 
 
 def bytes_to_text(data: bytes) -> str | None:
@@ -237,8 +250,38 @@ def php_urldecode(text: str) -> str:
     return _percent_decode(text.replace("+", " "))
 
 
+def parse_php_version(version: str | tuple[int, int] | None) -> tuple[int, int]:
+    if version is None:
+        return (8, 3)
+    if isinstance(version, tuple):
+        major = int(version[0])
+        minor = int(version[1]) if len(version) > 1 else 0
+        return (major, minor)
+    text = str(version).strip()
+    if text.startswith("php"):
+        text = text[3:].lstrip()
+    parts = text.split(".")
+    try:
+        major = int(parts[0])
+    except (TypeError, ValueError):
+        return (8, 3)
+    try:
+        minor = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        minor = 0
+    return (major, minor)
+
+
+def php_string_bytes(text: str) -> bytes:
+    """PHP strings are byte arrays. Characters above U+00FF are not representable."""
+    try:
+        return text.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("PHP strings are bytes; character is outside latin-1") from exc
+
+
 def php_bitwise_not(text: str) -> str:
-    data = text.encode("latin-1", errors="replace")
+    data = php_string_bytes(text)
     return bytes((~b) & 0xFF for b in data).decode("latin-1")
 
 
@@ -249,48 +292,82 @@ def quoted_printable_decode(text: str) -> str | None:
         return None
 
 
+@dataclass(frozen=True)
+class UudecodeResult:
+    data: bytes
+    recovered: bool = False
+
+
 def uudecode(text: str) -> bytes | None:
+    result = uudecode_ex(text)
+    return None if result is None else result.data
+
+
+def uudecode_ex(text: str) -> UudecodeResult | None:
+    """PHP convert_uudecode. Padding retries are marked recovered, not clean."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out = bytearray()
+    recovered = False
     for line in lines:
         if not line or line.startswith("begin ") or line.strip() == "end":
             continue
-        padded = line if len(line) >= 1 else ""
         try:
-            out.extend(binascii.a2b_uu(padded))
+            out.extend(binascii.a2b_uu(line))
             continue
         except binascii.Error:
             pass
         try:
-            out.extend(binascii.a2b_uu(padded + " " * 36))
+            out.extend(binascii.a2b_uu(line + " " * 36))
+            recovered = True
         except Exception:
             return None
-    return bytes(out) if out else None
+    if not out:
+        return None
+    return UudecodeResult(bytes(out), recovered=recovered)
 
 
 def stripslashes(text: str) -> str:
+    """PHP stripslashes: `\\0` is NUL, a trailing lone backslash is dropped."""
     out: list[str] = []
     i = 0
-    while i < len(text):
-        if text[i] == "\\" and i + 1 < len(text):
-            out.append(text[i + 1])
-            i += 2
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 1
+            if i >= n:
+                break
+            nxt = text[i]
+            out.append("\0" if nxt == "0" else nxt)
+            i += 1
             continue
         out.append(text[i])
         i += 1
     return "".join(out)
 
 
-def php_substr(text: str, start: int, length: int | None = None) -> str:
+def php_substr(
+    text: str,
+    start: int,
+    length: int | None = None,
+    *,
+    php_version: str | tuple[int, int] | None = "8.3",
+) -> str | bool:
+    """PHP substr. PHP 8 returns '' when the start is past the string; PHP 5/7 return false."""
     n = len(text)
+    major, _minor = parse_php_version(php_version)
+    oob: str | bool = "" if major >= 8 else False
+    if start >= n:
+        return oob
     if start < 0:
-        start = max(n + start, 0)
+        start = n + start
+        if start < 0:
+            start = 0
     if length is None:
         return text[start:]
     if length < 0:
         end = n + length
         if end <= start:
-            return ""
+            return oob
         return text[start:end]
     return text[start : start + length]
 
@@ -338,8 +415,8 @@ def xor_bytes(data: bytes, key: bytes) -> bytes | None:
 
 
 def xor_strings(left: str, right: str) -> str:
-    a = left.encode("latin-1", errors="replace")
-    b = right.encode("latin-1", errors="replace")
+    a = php_string_bytes(left)
+    b = php_string_bytes(right)
     n = min(len(a), len(b))
     return bytes(x ^ y for x, y in zip(a[:n], b[:n])).decode("latin-1")
 

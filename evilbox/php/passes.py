@@ -15,6 +15,7 @@ from evilbox.decode import (
     parse_quoted_string,
     php_bitwise_not,
     php_quote,
+    php_string_bytes,
     php_substr,
     php_urldecode,
     quoted_printable_decode,
@@ -24,7 +25,7 @@ from evilbox.decode import (
     stripslashes,
     unescape_html_entities,
     unescape_js_string_body,
-    uudecode,
+    uudecode_ex,
     xor_bytes,
     xor_strings,
     zlib_bytes,
@@ -60,15 +61,29 @@ class Value:
 @dataclass
 class FoldEnv:
     arrays: dict[str, list[Value]] = field(default_factory=dict)
+    keyed_arrays: dict[str, dict[Any, Value]] = field(default_factory=dict)
     scalars: dict[str, Value] = field(default_factory=dict)
     concat_rhs: dict[str, object] = field(default_factory=dict)
     concat_extra: dict[str, list] = field(default_factory=dict)
+    php_version: str = "8.3"
+    path: str | None = None
+    original: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
-def transform_php(source: str) -> tuple[str, list[str]]:
+def transform_php(
+    source: str,
+    *,
+    php_version: str = "8.3",
+    path: str | None = None,
+    original: str | None = None,
+) -> tuple[str, list[str]]:
     warnings: list[str] = []
     tree = parse_php(source)
     env = collect_env(tree, source)
+    env.php_version = php_version
+    env.path = path
+    env.original = original if original is not None else source
     replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, php_quote))
     for node in walk(tree.root_node):
         rendered = _render_if_simplified(node, source, env)
@@ -79,6 +94,7 @@ def transform_php(source: str) -> tuple[str, list[str]]:
             replacements.append((node.start_byte, node.end_byte, rendered))
     text = apply_replacements(source, replacements)
     text = _rename_junk(text)
+    warnings.extend(env.warnings)
     return text, warnings
 
 
@@ -96,9 +112,15 @@ def collect_env(tree, source: str) -> FoldEnv:
                 continue
             name = node_text(source, left).lstrip("$")
             if right.type == "array_creation_expression":
-                elems = _php_array_elements(right, source, env)
+                elems, keyed = _php_array_parts(right, source, env)
                 if elems is not None:
                     env.arrays[name] = elems
+                else:
+                    env.arrays.pop(name, None)
+                if keyed:
+                    env.keyed_arrays[name] = keyed
+                else:
+                    env.keyed_arrays.pop(name, None)
                 env.scalars.pop(name, None)
                 env.concat_rhs.pop(name, None)
                 env.concat_extra.pop(name, None)
@@ -160,19 +182,37 @@ def _concat_collapse_replacements(source: str, env: FoldEnv, quote_fn) -> list[t
     return out
 
 
-def _php_array_elements(node, source: str, env: FoldEnv | None) -> list[Value] | None:
+def _php_array_parts(
+    node, source: str, env: FoldEnv | None
+) -> tuple[list[Value] | None, dict[Any, Value] | None]:
     elems: list[Value] = []
+    keyed: dict[Any, Value] = {}
+    saw_list = False
     for el in node.named_children:
         if el.type != "array_element_initializer":
             continue
         named = [c for c in el.named_children]
         if len(named) == 2:
-            return None
+            key_v = const_eval(named[0], source, env)
+            val_v = const_eval(named[1], source, env)
+            if key_v is None or val_v is None:
+                return None, None
+            if not isinstance(key_v.py, (str, int)) or isinstance(key_v.py, bool):
+                return None, None
+            keyed[key_v.py] = val_v
+            continue
         inner = named[0] if named else el
         item = const_eval(inner, source, env)
         if item is None:
-            return None
+            return None, None
         elems.append(item)
+        saw_list = True
+    list_out = elems if saw_list or not keyed else None
+    return list_out, (keyed or None)
+
+
+def _php_array_elements(node, source: str, env: FoldEnv | None) -> list[Value] | None:
+    elems, _keyed = _php_array_parts(node, source, env)
     return elems
 
 
@@ -290,6 +330,15 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if word == "false":
             return Value(False)
         return Value(None)
+    if t in {"name", "magic_constant", "constant"}:
+        raw = node_text(source, node)
+        if raw in {"__FILE__", "__DIR__"} and env is not None and env.path:
+            from pathlib import Path
+
+            sample = Path(env.path)
+            if raw == "__FILE__":
+                return Value(str(sample))
+            return Value(str(sample.parent))
     if t == "boolean":
         return Value(node_text(source, node).lower() == "true")
     if t == "null":
@@ -309,7 +358,9 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return None
         return env.scalars.get(val.py)
     if t == "array_creation_expression":
-        elems = _php_array_elements(node, source, env)
+        elems, keyed = _php_array_parts(node, source, env)
+        if keyed and elems is None:
+            return Value(keyed)
         return Value(elems) if elems is not None else None
     if t == "parenthesized_expression":
         inner = node.named_children[0] if node.named_children else None
@@ -408,7 +459,10 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(val.py if op == "+" else -val.py)
     if op == "~":
         if isinstance(val.py, str):
-            return Value(php_bitwise_not(val.py))
+            try:
+                return Value(php_bitwise_not(val.py))
+            except ValueError:
+                return None
         if isinstance(val.py, bytes):
             return Value(bytes((~b) & 0xFF for b in val.py))
         if _is_num(val.py):
@@ -433,7 +487,10 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if lv is None or rv is None:
         return None
     if op == "^" and isinstance(lv.py, str) and isinstance(rv.py, str):
-        return Value(xor_strings(lv.py, rv.py))
+        try:
+            return Value(xor_strings(lv.py, rv.py))
+        except ValueError:
+            return None
     if op == "^" and _is_num(lv.py) and _is_num(rv.py):
         return Value(int(lv.py) ^ int(rv.py))
     if op in {"&", "|", "<<", ">>"} and _is_num(lv.py) and _is_num(rv.py):
@@ -496,6 +553,11 @@ def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
         if val is not None and isinstance(val.py, str):
             return val.py.lstrip("\\").lower()
         return None
+    if fn.type == "subscript_expression":
+        item = _eval_subscript(fn, source, env)
+        if item is not None and isinstance(item.py, str) and item.py:
+            return item.py.lstrip("\\").lower()
+        return None
     if fn.type == "name":
         return node_text(source, fn).lstrip("\\").lower()
     val = const_eval(fn, source, env)
@@ -538,7 +600,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if isinstance(val.py, bytes):
             return val.py
         if isinstance(val.py, str):
-            return val.py.encode("latin-1", errors="replace")
+            try:
+                return php_string_bytes(val.py)
+            except ValueError:
+                return None
         return None
 
     def as_str(val: Value) -> str | None:
@@ -561,6 +626,11 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return None
         name = cb.lstrip("\\").lower()
         values = [item if isinstance(item, Value) else Value(item) for item in items]
+    elif name == "ob_start" and values:
+        cb = as_str(values[0])
+        if cb:
+            name = cb.lstrip("\\").lower()
+            values = values[1:]
 
     if name == "base64_decode" and values:
         raw = as_str(values[0])
@@ -694,7 +764,8 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if s is None:
             return None
         length = int(values[2].py) if len(values) > 2 and _is_num(values[2].py) else None
-        return Value(php_substr(s, int(values[1].py), length))
+        version = env.php_version if env is not None else "8.3"
+        return Value(php_substr(s, int(values[1].py), length, php_version=version))
 
     if name in {"strtolower", "mb_strtolower"} and values:
         s = as_str(values[0])
@@ -748,8 +819,12 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = as_str(values[0])
         if s is None:
             return None
-        data = uudecode(s)
-        return Value(data) if data is not None else None
+        decoded = uudecode_ex(s)
+        if decoded is None:
+            return None
+        if decoded.recovered and env is not None:
+            env.warnings.append("convert_uudecode used line padding; output marked recovered")
+        return Value(decoded.data)
 
     if name == "ord" and values:
         s = as_str(values[0])
@@ -831,18 +906,86 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if name == "array_map" and len(values) >= 2:
         cb = (as_str(values[0]) or "").lstrip("\\").lower()
         items = values[1].py if isinstance(values[1].py, list) else None
-        if cb == "base64_decode" and items is not None:
-            out: list[Value] = []
+        if cb and items is not None:
+            mapped: list[Value] = []
+            for item in items:
+                applied = _eval_named(cb, [item if isinstance(item, Value) else Value(item)], source, env)
+                if applied is None:
+                    mapped = []
+                    break
+                mapped.append(applied)
+            if mapped:
+                return Value(mapped)
+
+    if name in {"array_filter", "array_walk", "usort", "uasort", "uksort"} and len(values) >= 2:
+        cb = (as_str(values[1]) or "").lstrip("\\").lower()
+        items = values[0].py if isinstance(values[0].py, list) else None
+        if cb in {"assert", "eval"} and items:
             for item in items:
                 raw = as_str(item if isinstance(item, Value) else Value(item))
-                if raw is None:
-                    return None
-                data = b64decode(raw)
-                if data is None:
-                    return None
-                out.append(Value(data))
-            return Value(out)
+                if raw:
+                    return Value(raw, splice_raw=True)
 
+    if name in {"file_get_contents", "readfile"} and values:
+        target = as_str(values[0])
+        if target:
+            data = _read_local_file(target, env)
+            if data is not None:
+                return Value(data)
+
+    if name == "dirname" and values:
+        s = as_str(values[0])
+        if s:
+            from pathlib import Path
+
+            return Value(str(Path(s).parent))
+
+    return None
+
+
+def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None) -> Value | None:
+    """Apply a known decoder by name to already-evaluated arguments."""
+    def as_str(val: Value) -> str | None:
+        if isinstance(val.py, str):
+            return val.py
+        if isinstance(val.py, bytes):
+            return bytes_to_text(val.py) or val.py.decode("latin-1")
+        return None
+
+    if name == "base64_decode" and values:
+        raw = as_str(values[0])
+        if raw is None:
+            return None
+        data = b64decode(raw)
+        return Value(data) if data is not None else None
+    if name == "str_rot13" and values:
+        s = as_str(values[0])
+        return Value(rot13(s)) if s is not None else None
+    if name == "strrev" and values:
+        s = as_str(values[0])
+        return Value(s[::-1]) if s is not None else None
+    if name == "gzinflate" and values:
+        data = values[0].py if isinstance(values[0].py, bytes) else None
+        if data is None and isinstance(values[0].py, str):
+            try:
+                data = php_string_bytes(values[0].py)
+            except ValueError:
+                data = None
+        if data is None:
+            return None
+        out = raw_inflate(data)
+        return Value(out) if out is not None else None
+    if name in {"urldecode"} and values:
+        s = as_str(values[0])
+        return Value(php_urldecode(s)) if s is not None else None
+    if name == "stripslashes" and values:
+        s = as_str(values[0])
+        return Value(stripslashes(s)) if s is not None else None
+    if name in {"eval", "assert"} and values:
+        s = as_str(values[0])
+        if s is None:
+            return None
+        return Value(s, splice_raw=True)
     return None
 
 
@@ -885,17 +1028,50 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         return None
     obj, index = named[0], named[1]
     idx_val = const_eval(index, source, env)
-    if idx_val is None or not _is_num(idx_val.py):
+    if idx_val is None:
+        return None
+    name = node_text(source, obj).lstrip("$") if obj.type == "variable_name" else None
+    if isinstance(idx_val.py, str) and env is not None and name:
+        keyed = env.keyed_arrays.get(name) or {}
+        item = keyed.get(idx_val.py)
+        return item
+    if not _is_num(idx_val.py):
         return None
     idx = int(idx_val.py)
     elems = None
     if obj.type == "variable_name" and env is not None:
-        elems = env.arrays.get(node_text(source, obj).lstrip("$"))
+        elems = env.arrays.get(name or "")
+        if elems is None:
+            keyed = env.keyed_arrays.get(name or "") or {}
+            item = keyed.get(idx)
+            if item is not None:
+                return item
     elif obj.type == "array_creation_expression":
         elems = _php_array_elements(obj, source, env)
     if elems is None or idx < 0 or idx >= len(elems):
         return None
     return elems[idx]
+
+
+def _read_local_file(target: str, env: FoldEnv | None) -> str | None:
+    if env is None:
+        return None
+    from pathlib import Path
+
+    if env.path:
+        sample = Path(env.path).resolve()
+        raw = Path(target)
+        if str(raw) == str(sample) or target.replace("\\", "/") == str(sample).replace("\\", "/"):
+            return env.original
+        try:
+            if not raw.is_absolute():
+                raw = (sample.parent / target).resolve()
+            raw.relative_to(sample.parent)
+        except (OSError, ValueError):
+            return None
+        if raw.is_file() and raw.stat().st_size <= 2 * 1024 * 1024:
+            return raw.read_text(encoding="utf-8", errors="replace")
+    return None
 
 
 def _eval_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:

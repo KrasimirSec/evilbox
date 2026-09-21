@@ -29,6 +29,8 @@ The official PHP runtime is **not** stored in git (hundreds of MB per arch). The
 
 That index includes linux/amd64 and linux/arm64 (PHP 8.3.33). Docker Hub still has to **pull this digest once** if it is not already on the machine. Later builds use the local copy.
 
+PHP 7.4 and 5.6 labs use the frozen upstream tags `php:7.4-cli-bullseye` (`Dockerfile.7.4`) and `php:5.6-cli` (`Dockerfile.5.6`). 7.4 still builds evalhook (PHP 7 `compile_string` ABI). 5.6 cannot: evalhook needs `zend_string`. That image still applies request profiles, WordPress stubs, and the sleep hook.
+
 Debian packages (`dnsmasq`, `python3-cryptography`, …) still come from the package indexes of that image’s OS. They are not vendored here; pinning the base digest keeps PHP itself fixed.
 
 To bump either pin: update this file, replace `vendor/php-eval-hook/` (and SHA256SUMS), and change the `FROM` digest in the Dockerfile after reviewing the new sources.
