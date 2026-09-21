@@ -9,17 +9,21 @@ from evilbox.decode import (
     b64decode,
     bytes_to_text,
     format_js_number,
+    hex_payload_to_text,
     js_quote,
-    parse_quoted_string,
+    js_unescape,
+    parse_js_quoted_string,
     percent_decode,
+    rc4_crypt,
     unescape_html_entities,
     unescape_js_string_body,
 )
 from evilbox.parsers import parse_js
-from evilbox.rewrite import apply_replacements, node_text, walk
+from evilbox.rewrite import apply_replacements, node_text, stmt_span, walk
 
 JS_JUNK_RE = re.compile(r"^_0x[0-9a-fA-F]+$")
 JS_HEX_NAME_RE = re.compile(r"^_?[a-f0-9]{6,}$", re.I)
+JS_LOOKALIKE_RE = re.compile(r"^[O0Il]{4,}$")
 
 JS_RESERVED = {
     "break",
@@ -101,10 +105,19 @@ class Value:
 
 
 @dataclass
+class DecoderInfo:
+    array: str
+    offset: int
+    encoding: str = "none"
+
+
+@dataclass
 class FoldEnv:
     arrays: dict[str, list[Value]] = field(default_factory=dict)
     scalars: dict[str, Value] = field(default_factory=dict)
-    decoders: dict[str, tuple[str, int]] = field(default_factory=dict)
+    decoders: dict[str, DecoderInfo] = field(default_factory=dict)
+    concat_rhs: dict[str, object] = field(default_factory=dict)
+    concat_extra: dict[str, list] = field(default_factory=dict)
 
 
 KNOWN_GLOBALS = {
@@ -130,7 +143,7 @@ def transform_js(source: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     tree = parse_js(source)
     env = collect_env(tree, source)
-    replacements: list[tuple[int, int, str]] = []
+    replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, js_quote))
     for node in walk(tree.root_node):
         rendered = _render_if_simplified(node, source, env)
         if rendered is None:
@@ -188,13 +201,51 @@ def collect_env(tree, source: str) -> FoldEnv:
         if value.type == "identifier" and node_text(source, value) in KNOWN_GLOBALS:
             env.scalars[name] = Value(node_text(source, value), splice_raw=True)
             continue
-        item = const_eval(value, source, None)
+        item = const_eval(value, source, env)
         if item is not None and not item.splice_raw:
             env.scalars[name] = item
+            env.concat_rhs[name] = value
+            env.concat_extra[name] = []
 
+    for node in walk(tree.root_node):
+        if node.type != "augmented_assignment_expression":
+            continue
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        op_node = node.child_by_field_name("operator")
+        op = op_node.type if op_node is not None else ""
+        if left is None or right is None or left.type != "identifier" or op != "+=":
+            continue
+        name = node_text(source, left)
+        prev = env.scalars.get(name)
+        item = const_eval(right, source, env)
+        if prev is not None and item is not None and isinstance(prev.py, str) and isinstance(item.py, str):
+            env.scalars[name] = Value(prev.py + item.py)
+            env.concat_extra.setdefault(name, []).append(node)
+        elif name in env.scalars and (item is None or not isinstance(item.py, str)):
+            env.scalars.pop(name, None)
+
+    _collect_array_functions(tree, source, env)
     _rotate_string_arrays(tree, source, env)
     _collect_array_decoders(tree, source, env)
     return env
+
+
+def _concat_collapse_replacements(source: str, env: FoldEnv, quote_fn) -> list[tuple[int, int, str]]:
+    out: list[tuple[int, int, str]] = []
+    for name, extras in env.concat_extra.items():
+        if not extras:
+            continue
+        val = env.scalars.get(name)
+        if val is None or not isinstance(val.py, str):
+            continue
+        rhs = env.concat_rhs.get(name)
+        if rhs is not None:
+            out.append((rhs.start_byte, rhs.end_byte, quote_fn(val.py)))
+        for extra in extras:
+            start, end = stmt_span(source, extra)
+            out.append((start, end, ""))
+    return out
 
 
 def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
@@ -238,6 +289,38 @@ def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
             env.arrays[arr_name] = items[rot:] + items[:rot]
 
 
+def _collect_array_functions(tree, source: str, env: FoldEnv) -> None:
+    """javascript-obfuscator wraps the string table in `function name() { var a = [...]; ... }`."""
+    for node in walk(tree.root_node):
+        if node.type != "function_declaration":
+            continue
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            continue
+        name = node_text(source, name_node)
+        if name in env.arrays:
+            continue
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        best: list[Value] | None = None
+        for inner in walk(body):
+            if inner.type != "array":
+                continue
+            elems: list[Value] = []
+            ok = True
+            for el in inner.named_children:
+                item = _array_element(el, source)
+                if item is None or item.splice_raw or not isinstance(item.py, str):
+                    ok = False
+                    break
+                elems.append(item)
+            if ok and elems and (best is None or len(elems) > len(best)):
+                best = elems
+        if best:
+            env.arrays[name] = best
+
+
 def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
     for node in walk(tree.root_node):
         if node.type not in {"function_declaration", "function_expression", "arrow_function"}:
@@ -248,31 +331,70 @@ def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
             if name_node is not None:
                 name = node_text(source, name_node)
         text = node_text(source, node)
+        params = _function_param_names(node, source)
         match = re.search(
-            r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,400}?"
-            r"(?:(?:\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,200})?"
+            r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,800}?"
+            r"(?:(?:\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,400})?"
             r"return\s+([A-Za-z_$][\w$]*)\s*\[\s*\2(?:\s*-\s*(0x[0-9a-fA-F]+|\d+))?\s*\])",
             text,
             re.S | re.I,
         )
         if not match:
             match = re.search(
-                r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,400}?"
-                r"\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,200}?"
+                r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{.{0,800}?"
+                r"\2\s*=\s*\2\s*-\s*(0x[0-9a-fA-F]+|\d+).{0,400}?"
                 r"return\s+([A-Za-z_$][\w$]*)\[",
                 text,
                 re.S | re.I,
             )
-        if not match:
-            continue
-        func = name or match.group(1)
-        arr = match.group(4) if match.lastindex and match.lastindex >= 4 else None
-        offset_txt = match.group(3) or (match.group(5) if match.lastindex and match.lastindex >= 5 else "0")
-        if not arr or arr not in env.arrays:
-            # group numbers vary; hunt array name from body
+        func = name or (match.group(1) if match else None)
+        arr = match.group(4) if match and match.lastindex and match.lastindex >= 4 else None
+        offset_txt = "0"
+        if match:
+            offset_txt = match.group(3) or (match.group(5) if match.lastindex and match.lastindex >= 5 else "0")
+        if not arr:
             found = re.findall(r"return\s+([A-Za-z_$][\w$]*)\s*\[", text)
             arr = next((n for n in found if n in env.arrays), None)
+        if not arr:
+            found = re.findall(
+                r"(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)",
+                text,
+            )
+            for local, callee in found:
+                if callee in env.arrays:
+                    arr = callee
+                    break
+                if local in env.arrays:
+                    arr = local
+                    break
+        if not arr:
+            found = re.findall(r"([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\[", text)
+            arr = next((n for n in found if n in env.arrays), None)
+        if not arr:
+            found = re.findall(r"return\s+([A-Za-z_$][\w$]*)\s*[;\n}]", text)
+            for cand in found:
+                if cand in env.arrays:
+                    arr = cand
+                    break
+            if not arr:
+                indexed = re.findall(
+                    r"([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*(?:\([^)]*\))?\s*\[",
+                    text,
+                )
+                for _local, callee in indexed:
+                    if callee in env.arrays:
+                        arr = callee
+                        break
         if not func or not arr:
+            continue
+        if arr not in env.arrays:
+            alias = re.search(
+                r"(?:var|let|const)\s+" + re.escape(arr) + r"\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)",
+                text,
+            )
+            if alias and alias.group(1) in env.arrays:
+                arr = alias.group(1)
+        if arr not in env.arrays:
             continue
         try:
             offset = int(offset_txt, 0) if offset_txt else 0
@@ -282,7 +404,76 @@ def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
             off_match = re.search(r"=\s*[A-Za-z_$][\w$]*\s*-\s*(0x[0-9a-fA-F]+|\d+)", text)
             if off_match:
                 offset = int(off_match.group(1), 0)
-        env.decoders[func] = (arr, offset)
+        encoding = _decoder_encoding(text, len(params))
+        env.decoders[func] = DecoderInfo(arr, offset, encoding)
+
+
+def _function_param_names(node, source: str) -> list[str]:
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        for child in node.children:
+            if child.type in {"formal_parameters", "parameters"}:
+                params = child
+                break
+    if params is None:
+        return []
+    names: list[str] = []
+    for child in params.named_children:
+        if child.type == "identifier":
+            names.append(node_text(source, child))
+        elif child.type == "required_parameter" and child.named_children:
+            inner = child.named_children[0]
+            if inner.type == "identifier":
+                names.append(node_text(source, inner))
+    return names
+
+
+def _decoder_encoding(text: str, param_count: int) -> str:
+    has_b64 = (
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=" in text
+        or re.search(r"\batob\b", text) is not None
+    )
+    compact = re.sub(r"\s+", "", text)
+    has_rc4 = "charCodeAt" in text and ("%256" in compact or "% 256" in text) and param_count >= 2
+    has_hex = (
+        re.search(r"parseInt\s*\([^,]+,\s*16\s*\)", text) is not None
+        or re.search(r"fromCharCode\s*\(\s*parseInt", text) is not None
+    )
+    if has_rc4:
+        return "rc4"
+    if has_b64:
+        return "base64"
+    if has_hex:
+        return "hex"
+    return "none"
+
+
+def _jo_decode_base64(text: str) -> str | None:
+    data = b64decode(text)
+    if data is None:
+        return None
+    return bytes_to_text(data)
+
+
+def _jo_decode_rc4(text: str, key: str) -> str | None:
+    data = b64decode(text)
+    if data is None:
+        return None
+    out = rc4_crypt(data, key.encode("latin-1"))
+    if out is None:
+        return None
+    decoded = bytes_to_text(out)
+    if decoded is not None:
+        return decoded
+    # javascript-obfuscator sometimes URI-decodes the ciphertext before RC4.
+    as_text = bytes_to_text(data)
+    if as_text is None:
+        return None
+    uri = percent_decode(as_text) or as_text
+    out = rc4_crypt(uri.encode("latin-1"), key.encode("latin-1"))
+    if out is None:
+        return None
+    return bytes_to_text(out)
 
 
 def _array_element(node, source: str) -> Value | None:
@@ -318,7 +509,7 @@ def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str 
 
 def _simplified_string(node, source: str) -> str | None:
     raw = node_text(source, node)
-    parsed = parse_quoted_string(raw)
+    parsed = parse_js_quoted_string(raw)
     if parsed is None:
         return None
     unescaped = unescape_html_entities(parsed)
@@ -351,7 +542,7 @@ def _format_value(val: Value) -> str:
 def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
     t = node.type
     if t == "string":
-        parsed = parse_quoted_string(node_text(source, node))
+        parsed = parse_js_quoted_string(node_text(source, node))
         if parsed is None:
             return None
         return Value(unescape_html_entities(parsed))
@@ -595,9 +786,14 @@ def _callee(node, source: str, env: FoldEnv | None) -> tuple[str | None, str | N
         name = node_text(source, fn)
         if env is not None and name in env.scalars and isinstance(env.scalars[name].py, str):
             alias = env.scalars[name]
-            if alias.splice_raw or alias.py in KNOWN_GLOBALS:
+            if alias.splice_raw or alias.py in KNOWN_GLOBALS or name in env.decoders or alias.py in env.decoders:
                 return str(alias.py), None, None
         return name, None, None
+    if fn.type in {"parenthesized_expression", "binary_expression", "string", "template_string"}:
+        val = const_eval(fn, source, env)
+        if val is not None and isinstance(val.py, str):
+            return val.py, None, None
+        return None, None, None
     if fn.type == "member_expression":
         obj = fn.child_by_field_name("object")
         prop = fn.child_by_field_name("property")
@@ -655,6 +851,25 @@ def _js_int(value: Any, radix: int | None = None) -> int | None:
     return None
 
 
+def _decode_array_item(item: Value, encoding: str, values: list[Value]) -> Value | None:
+    if encoding == "none" or not isinstance(item.py, str):
+        return item
+    text = item.py
+    if encoding == "base64":
+        decoded = _jo_decode_base64(text)
+        return Value(decoded) if decoded is not None else item
+    if encoding == "rc4":
+        key = values[1].py if len(values) > 1 and isinstance(values[1].py, str) else None
+        if key is None:
+            return None
+        decoded = _jo_decode_rc4(text, key)
+        return Value(decoded) if decoded is not None else item
+    if encoding == "hex":
+        decoded = hex_payload_to_text(text, min_bytes=1)
+        return Value(decoded) if decoded is not None else item
+    return item
+
+
 def _eval_new(node, source: str, env: FoldEnv | None = None) -> Value | None:
     ctor = node.child_by_field_name("constructor")
     if ctor is None and node.named_children:
@@ -683,19 +898,23 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     obj, prop, recv = _callee(node, source, env)
 
     if env is not None and obj is not None and prop is None and obj in env.decoders:
-        arr_name, offset = env.decoders[obj]
-        items = env.arrays.get(arr_name) or []
+        info = env.decoders[obj]
+        items = env.arrays.get(info.array) or []
         raw_idx = values[0].py if values else None
         idx = _js_int(raw_idx)
         if idx is None:
             return None
-        idx -= offset
+        idx -= info.offset
         if 0 <= idx < len(items):
-            return items[idx]
+            item = items[idx]
+            return _decode_array_item(item, info.encoding, values)
+        return None
 
     if obj == "eval" and prop is None:
         if values and isinstance(values[0].py, str):
-            return Value(values[0].py, splice_raw=True)
+            text = values[0].py
+            decoded = hex_payload_to_text(text, min_bytes=8)
+            return Value(decoded or text, splice_raw=True)
         return None
     if obj == "eval" and prop == "call" and len(values) >= 2 and isinstance(values[1].py, str):
         return Value(values[1].py, splice_raw=True)
@@ -703,6 +922,11 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if values and isinstance(values[0].py, str):
             return Value(values[0].py, splice_raw=True)
         return None
+    if obj in {"setTimeout", "setInterval"} and prop is None and values and isinstance(values[0].py, str):
+        return Value(values[0].py, splice_raw=True)
+    if obj in {"window", "globalThis", "self"} and prop in {"setTimeout", "setInterval"}:
+        if values and isinstance(values[0].py, str):
+            return Value(values[0].py, splice_raw=True)
 
     if (obj == "atob" and prop is None) or (
         obj in {"window", "globalThis", "self", "this"} and prop == "atob"
@@ -716,12 +940,28 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         text = bytes_to_text(data)
         return Value(text) if text is not None else None
 
-    if obj in {"unescape", "decodeURIComponent", "decodeURI"} and prop is None:
+    if obj == "unescape" and prop is None:
+        s = values[0].py if values and isinstance(values[0].py, str) else None
+        if s is None:
+            return None
+        return Value(js_unescape(s))
+    if obj in {"decodeURIComponent", "decodeURI"} and prop is None:
         s = values[0].py if values and isinstance(values[0].py, str) else None
         if s is None:
             return None
         decoded = percent_decode(s)
         return Value(decoded if decoded is not None else s)
+
+    if obj == "Buffer" and prop == "from" and values:
+        raw = values[0].py
+        enc = values[1].py.lower() if len(values) > 1 and isinstance(values[1].py, str) else "utf8"
+        if enc == "hex" and isinstance(raw, str):
+            decoded = hex_payload_to_text(raw, min_bytes=1)
+            return Value(decoded) if decoded is not None else None
+        if isinstance(raw, str):
+            return Value(raw)
+        if isinstance(raw, list):
+            return _from_char_code([x if isinstance(x, Value) else Value(x) for x in raw])
 
     if obj == "Function" and prop is None:
         if values and isinstance(values[-1].py, str):
@@ -827,6 +1067,8 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
             return Value(py.lower())
         if name == "toUpperCase":
             return Value(py.upper())
+        if name == "toString":
+            return Value(py)
         if name == "indexOf" and values and isinstance(values[0].py, str):
             return Value(py.find(values[0].py))
         if name == "repeat" and values and _is_num(values[0].py):
@@ -884,7 +1126,12 @@ def _rename_junk(source: str) -> str:
         name = node_text(source, node)
         if name in JS_RESERVED:
             continue
-        if not (JS_JUNK_RE.match(name) or (JS_HEX_NAME_RE.match(name) and name.lower().startswith("_0x"))):
+        if not (
+            JS_JUNK_RE.match(name)
+            or (JS_HEX_NAME_RE.match(name) and name.lower().startswith("_0x"))
+            or JS_LOOKALIKE_RE.match(name)
+            or any(ord(ch) > 127 for ch in name)
+        ):
             continue
         if name not in mapping:
             mapping[name] = f"v{order}"

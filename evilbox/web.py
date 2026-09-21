@@ -26,8 +26,8 @@ from evilbox.report import build_report, dump_json
 
 MAX_BYTES = int(os.environ.get("EVILBOX_WEB_MAX_BYTES", str(2 * 1024 * 1024)))
 DECODE_TIMEOUT = float(os.environ.get("EVILBOX_WEB_TIMEOUT", "20"))
-MAX_PASSES = 12
-DEFAULT_PASSES = 8
+MAX_PASSES = 24
+DEFAULT_PASSES = 16
 MAX_CONCURRENT = 4
 INDEX_PATH = Path(__file__).with_name("web_index.html")
 

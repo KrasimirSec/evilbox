@@ -36,6 +36,21 @@ def walk(node):
         yield from walk(child)
 
 
+def stmt_span(source: str, node) -> tuple[int, int]:
+    """Byte range of a statement, including a trailing semicolon and newline."""
+    data = source.encode("utf-8")
+    end = node.end_byte
+    while end < len(data) and data[end] in b" \t":
+        end += 1
+    if end < len(data) and data[end] == ord(";"):
+        end += 1
+    if end < len(data) and data[end] == ord("\r"):
+        end += 1
+    if end < len(data) and data[end] == ord("\n"):
+        end += 1
+    return node.start_byte, end
+
+
 def has_error(node) -> bool:
     if node.type == "ERROR" or node.is_missing:
         return True

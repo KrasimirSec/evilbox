@@ -29,13 +29,63 @@ def b64decode(text: str) -> bytes | None:
 
 
 def hex_decode(text: str) -> bytes | None:
-    cleaned = re.sub(r"[\s:]", "", text)
+    cleaned = text.strip()
+    if re.search(r"\\x[0-9a-fA-F]{2}", cleaned, re.I):
+        cleaned = re.sub(r"\\x", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"0x", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"[\s:_,\-]", "", cleaned)
     if len(cleaned) < 2 or len(cleaned) % 2 or not _HEX_RE.match(cleaned):
         return None
     try:
         return bytes.fromhex(cleaned)
     except ValueError:
         return None
+
+
+def hex_payload_to_text(text: str, *, min_bytes: int = 2) -> str | None:
+    data = hex_decode(text)
+    if data is None or len(data) < min_bytes:
+        return None
+    decoded = bytes_to_text(data)
+    if decoded is None:
+        return None
+    printable = sum(1 for ch in decoded if ch.isprintable() or ch in "\n\r\t")
+    if printable / max(len(decoded), 1) < 0.85:
+        return None
+    return decoded
+
+
+def parse_js_quoted_string(literal: str) -> str | None:
+    """JS single and double quotes both honour \\x / \\u / octal escapes."""
+    if len(literal) < 2:
+        return None
+    quote = literal[0]
+    if quote not in "'\"" or literal[-1] != quote:
+        return None
+    return unescape_js_string_body(literal[1:-1])
+
+
+def js_unescape(text: str) -> str:
+    """JS unescape(): %uXXXX and %HH."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "%" and i + 5 < n and text[i + 1] in "uU":
+            hexpart = text[i + 2 : i + 6]
+            if re.fullmatch(r"[0-9a-fA-F]{4}", hexpart):
+                out.append(chr(int(hexpart, 16)))
+                i += 6
+                continue
+        if text[i] == "%" and i + 2 < n:
+            hexpart = text[i + 1 : i + 3]
+            if re.fullmatch(r"[0-9a-fA-F]{2}", hexpart):
+                out.append(chr(int(hexpart, 16)))
+                i += 3
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
 
 
 def rot13(text: str) -> str:
@@ -45,6 +95,15 @@ def rot13(text: str) -> str:
 def gzip_bytes(data: bytes) -> bytes | None:
     try:
         return gzip.decompress(data)
+    except Exception:
+        return None
+
+
+def bzip_bytes(data: bytes) -> bytes | None:
+    try:
+        import bz2
+
+        return bz2.decompress(data)
     except Exception:
         return None
 

@@ -42,7 +42,7 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `-o PATH` | Write cleaned source to a file (or a directory when the input is a folder) |
 | `--report PATH` | JSON report (`evilbox.report.v1`) |
 | `--html PATH` | HTML report |
-| `--max-passes N` | Unwrap/fold iterations (default: 8) |
+| `--max-passes N` | Unwrap/fold iterations (default: 16) |
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
 | `--logs-dir PATH` | Sandbox log root (default: `EVILBOX_LOGS` or `./sandbox-logs`) |
 | `--timeout N` | Sandbox PHP timeout in seconds (default: 15) |
@@ -142,22 +142,38 @@ Each item has `kind`, `value`, a `yara` needle, and a short `why`.
 
 ## Unpacking
 
-Still static: no JS/PHP engine.
+Still static: no JS/PHP engine. Nested codec expressions fold in one pass when every function is implemented; leftover `eval` wrappers iterate up to 16 times (configurable).
 
-- Unescape string literals (`\xNN`, `\uNNNN`, octal, HTML entities)
-- Concatenate adjacent string literals (`+` in JS, `.` in PHP)
-- Fold simple numeric/boolean constants (`1+2`, `!0`) and JS bitwise ops including `>>>`
-- JS: `eval(atob(...))`, `window["eval"]` / `eval.call`, `unescape` / `decodeURIComponent`, `String.fromCharCode` (including `String["fromCharCode"]` and `.apply`)
-- JS: string methods on literals (`charAt`, `concat`, `slice` / `substr`, `split`+`reverse`+`join`, `toLowerCase` / `toUpperCase`, `replace`)
-- JS: `parseInt` / `Number` / `String`, `(n).toString(radix)`, array `.join`, `Function("...")` / `new Function`
-- JS: fold one-shot `var s = "..."`, template strings with constant substitutions, and simple string-array + rotator + `return arr[i - offset]` decoders (javascript-obfuscator style)
-- PHP: `eval` / `assert` / `create_function` / `preg_replace /e` / `include`/`require` of decoded payloads
-- PHP: `base64_decode`, `gzinflate` / `gzuncompress` / `gzdecode`, `str_rot13`, `strrev`, `urldecode` / `rawurldecode`, `hex2bin`, `pack('H*', ...)`, `convert_uudecode`, `quoted_printable_decode`
-- PHP: string XOR, repeating-key `xor` / `rc4`, bitwise `~` on strings, `chr` / `ord` / `strtr` / `str_repeat` / `str_replace` / `substr` / `implode` / `sprintf` / case folds
-- PHP: `$arr[i]` folding, `$fn = 'base64_decode'; $fn(...)` when `$fn` is assigned once
-- Rename `_0x...` junk identifiers (and PHP `$` hex names of that form)
+**Encoding and compression**
 
-Not included: control-flow flattening, VM/dispatcher unpackers, or running a JavaScript engine.
+- Unescape string literals (`\xNN`, `\uNNNN`, octal, HTML entities) in JS (both quote styles) and PHP double quotes
+- Whole-file hex dumps, `\xHH` / `\uHHHH` streams, `hex2bin` / `pack('H*')` / `unpack('H*')`, `Buffer.from(..., 'hex')`, `unescape('%uXXXX')`
+- PHP: `base64_decode`, `gzinflate` / `gzuncompress` / `gzdecode`, `bzdecompress`, `str_rot13`, `strrev`, `urldecode` / `rawurldecode`, `convert_uudecode`, `quoted_printable_decode`
+- Nested chains such as `eval(gzinflate(base64_decode(str_rot13(...))))`
+- String XOR and repeating-key `xor` / `rc4` when the key is a constant in the same file
+- `chr` / `ord` chains, `sprintf` / `implode` / `str_replace` / `substr` / `strtr`
+
+**Packers and character encodings**
+
+- Dean Edwards `p.a.c.k.e.r.` (`eval(function(p,a,c,k,e,d)…`), including nested layers
+- javascript-obfuscator / obfuscator.io / sojson / jsjiami string-array + rotator + index decoder, including base64, RC4, and hex array encodings
+- JSFuck (`[]()!+`) Function-constructor payloads, percent-encoded bookmarklets, jjencode, and a best-effort AAEncode unwrap
+- Split identifiers: `$f = "bas"."e64"."_dec"."ode"` and `$f .= ...` / JS `"at"+"ob"` / `window['at'+'ob']`
+
+**Dynamic execution (static splice when the callback and payload are constants)**
+
+- PHP: `eval`, `assert`, `create_function`, `preg_replace /e`, `call_user_func` / `call_user_func_array`, `register_shutdown_function`, variable functions, variable variables (`$$a`), `array_map('base64_decode', ...)`
+- JS: `Function` / `new Function`, `setTimeout` / `setInterval` with a string, `eval.call`, computed `window['atob']`
+
+**Layout and junk**
+
+- Collapse huge blank-line / space runs
+- Extract `__halt_compiler()` trailers (hex / base64 / zlib when they decode)
+- Rename `_0x…`, lookalike `O0Il` names, long underscore names, and non-ASCII identifier homoglyphs
+
+**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file; EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers.
+
+Not included: running a JavaScript or PHP engine over HTTP. The optional Docker sandbox remains CLI-only.
 
 ## PHP sandbox (evalhook, no real internet)
 
