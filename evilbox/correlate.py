@@ -82,11 +82,20 @@ def _role_names(roles: list[Any]) -> list[str]:
     return out
 
 
-def attack_from_classification(capabilities: list[Any], roles: list[Any]) -> list[dict[str, str]]:
+def attack_from_classification(
+    capabilities: list[Any],
+    roles: list[Any],
+    *,
+    language: str | None = None,
+) -> list[dict[str, str]]:
     seen: set[str] = set()
     rows: list[dict[str, str]] = []
     for cap_id in _cap_ids(capabilities):
         for technique_id, name in CAP_TO_ATTACK.get(cap_id, ()):
+            if technique_id == "T1059.007" and language == "php":
+                continue
+            if technique_id == "T1059.004" and language == "js":
+                continue
             if technique_id in seen:
                 continue
             seen.add(technique_id)
@@ -156,7 +165,11 @@ def build_correlation(
     else:
         names = {item.name for item in fields(Indicators)}
         iocs = Indicators(**{k: list(v) for k, v in indicators.items() if k in names and v is not None})
-    attack = attack_from_classification(capabilities or [], roles or [])
+    attack = attack_from_classification(
+        capabilities or [],
+        roles or [],
+        language=(sample or {}).get("language"),
+    )
     sample = sample or {}
     keys = campaign_keys(iocs)
     return {
