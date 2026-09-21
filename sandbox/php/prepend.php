@@ -41,7 +41,7 @@ require_once __DIR__ . '/wp-stubs.php';
 
 function __eval($code, $file)
 {
-    $dir = getenv('SANDBOX_LOGS') ?: '/logs';
+    $dir = '/logs/php';
     if (!is_dir($dir)) {
         @mkdir($dir, 0777, true);
     }
@@ -51,7 +51,11 @@ function __eval($code, $file)
     @file_put_contents($dump, $code);
     $header = sprintf("--- eval #%d @ %s ---\n", $n, $file);
     @file_put_contents($dir . '/eval.log', $header . $code . "\n\n", FILE_APPEND);
-    $mode = getenv('SANDBOX_MODE') ?: 'dump';
+    $mode = 'dump';
+    $modeFile = '/logs/mode';
+    if (is_file($modeFile)) {
+        $mode = trim((string) @file_get_contents($modeFile));
+    }
     if ($mode === 'dump') {
         return false;
     }

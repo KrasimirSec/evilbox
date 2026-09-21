@@ -69,9 +69,16 @@ def _read_text(path: Path) -> str:
     if not path.is_file():
         raise CliError(f"not a readable file: {path}")
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except OSError as exc:
         raise CliError(_os_message(exc, str(path))) from exc
+    suffix = path.suffix.lower()
+    if suffix in PHP_EXTS:
+        return data.decode("latin-1")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -107,8 +114,8 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-passes", type=int, default=16, help="Maximum unwrap/fold iterations (default: 16)")
     parser.add_argument(
         "--php-version",
-        default="8.3",
-        help="PHP language version for folds and sandbox image (5.6, 7.4, 8.3; default: 8.3)",
+        default=None,
+        help="PHP language version for folds and sandbox image (5.6, 7.4, 8.3). Default: 8.3 static, 7.4 for sandbox observe",
     )
     parser.add_argument(
         "--sandbox-profile",
@@ -131,6 +138,15 @@ def _main(argv: list[str] | None = None) -> int:
         default=15,
         help="Sandbox PHP timeout in seconds (default: 15)",
     )
+    parser.add_argument(
+        "--keep-name",
+        action="store_true",
+        help="Mount the sample under its original filename inside the sandbox",
+    )
+    parser.add_argument(
+        "--stage-file",
+        help="Bytes the sandbox HTTP sink should serve instead of OK (second-stage replay)",
+    )
     parser.add_argument("--report", help="Write JSON report to this path (directory in batch mode)")
     parser.add_argument("--html", help="Write HTML report to this path (directory in batch mode)")
     parser.add_argument("--who", action="store_true", help=argparse.SUPPRESS)
@@ -143,6 +159,11 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
     if not args.input:
         parser.error("the following arguments are required: input")
+
+    php_version = args.php_version
+    if php_version is None:
+        php_version = "7.4" if args.sandbox == "observe" else "8.3"
+    args.php_version = php_version
 
     if args.input != "-" and Path(args.input).is_dir():
         return _run_batch(args)
@@ -196,30 +217,52 @@ def _run_batch(args) -> int:
     for sample in files:
         try:
             source = _read_text(sample)
-        except CliError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            result = deobfuscate(
+                source,
+                language=args.lang,
+                path=str(sample),
+                max_passes=args.max_passes,
+                php_version=getattr(args, "php_version", "8.3"),
+            )
+        except Exception as exc:
+            print(f"error: {sample}: {exc}", file=sys.stderr)
             status = 2
             continue
-        result = deobfuscate(
-            source,
-            language=args.lang,
-            path=str(sample),
-            max_passes=args.max_passes,
-            php_version=getattr(args, "php_version", "8.3"),
-        )
         cluster_samples.append((str(sample), result.text))
-        dest = out_dir / (sample.stem + ".clean" + sample.suffix)
-        report_path = out_dir / (sample.stem + ".report.json")
-        html_path = (html_dir / (sample.stem + ".report.html")) if html_dir else None
+        rel = sample.relative_to(root)
+        dest_dir = out_dir / rel.parent
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"error: {_os_message(exc, str(dest_dir))}", file=sys.stderr)
+            status = 2
+            continue
+        dest = dest_dir / (rel.stem + ".clean" + rel.suffix)
+        report_path = dest_dir / (rel.stem + ".report.json")
+        html_path = None
+        if html_dir:
+            html_dest_dir = html_dir / rel.parent
+            try:
+                html_dest_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                print(f"error: {_os_message(exc, str(html_dest_dir))}", file=sys.stderr)
+                status = 2
+                continue
+            html_path = html_dest_dir / (rel.stem + ".report.html")
         fake = argparse.Namespace(
             output=str(dest),
             report=str(report_path),
             html=str(html_path) if html_path else None,
         )
-        code = _emit(fake, result, str(sample), stdout_code=False)
+        try:
+            code = _emit(fake, result, str(sample), stdout_code=False)
+        except Exception as exc:
+            print(f"error: {sample}: {exc}", file=sys.stderr)
+            status = 2
+            continue
         if code:
             status = code
-        print(f"{sample.name}: {', '.join(r.name for r in result.classification.roles) or 'unclassified'}", file=sys.stderr)
+        print(f"{rel}: {', '.join(r.name for r in result.classification.roles) or 'unclassified'}", file=sys.stderr)
     clusters = cluster_groups(cluster_samples)
     _write_text(out_dir / "clusters.json", json.dumps(clusters, indent=2) + "\n")
     return status
@@ -247,6 +290,8 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
             timeout=args.timeout,
             php_version=getattr(args, "php_version", "8.3"),
             profile=getattr(args, "sandbox_profile", "default"),
+            keep_name=bool(getattr(args, "keep_name", False)),
+            stage_file=Path(args.stage_file) if getattr(args, "stage_file", None) else None,
         )
     except SandboxError as exc:
         raise CliError(str(exc)) from exc

@@ -150,6 +150,12 @@ def test_api_rejects_oversized(web_url):
     assert "too large" in data.get("error", "too large")
 
 
+def test_decode_has_no_wildcard_cors(web_url):
+    status, body, headers = _get(web_url, "/health")
+    assert status == 200
+    assert headers.get("Access-Control-Allow-Origin") in {None, ""}
+
+
 def test_get_decode_is_method_not_allowed(web_url):
     req = Request(web_url + "/api/decode", method="GET")
     with pytest.raises(HTTPError) as exc:
@@ -166,3 +172,5 @@ def test_decode_timeout_uses_subprocess():
     assert "Popen" in source
     assert "SIGKILL" in source
     assert "DECODE_TIMEOUT" in source
+    assert "worker_entry" in web._WORKER
+    assert "setrlimit" in inspect.getsource(web.apply_resource_limits)

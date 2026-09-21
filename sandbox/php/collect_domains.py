@@ -42,7 +42,7 @@ def main() -> int:
             host = str(rec.get("host") or "").split(":")[0].lower()
             if host:
                 domains.add(host)
-    evals = sorted(LOGS.glob("eval-*.php"))
+    evals = sorted(list(LOGS.glob("eval-*.php")) + list(LOGS.glob("php/eval-*.php")))
     summary = {
         "domains": sorted(domains),
         "http_requests": requests,

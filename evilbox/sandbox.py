@@ -46,6 +46,7 @@ class SandboxResult:
     image_tag: str
     http: list[dict]
     analysis: object | None = None
+    tcp: list[dict] | None = None
 
 
 def _run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -78,27 +79,42 @@ def sandbox_dockerfile(php_version: str = "8.3") -> Path:
     return context / "Dockerfile"
 
 
+def docker_has_runtime(name: str) -> bool:
+    proc = _run(["docker", "info", "--format", "{{json .Runtimes}}"], timeout=20)
+    if proc.returncode != 0:
+        return False
+    return name in (proc.stdout or "")
+
+
 def docker_run_args(
     *,
     tag: str,
     sample: Path,
-    log_dir: Path,
+    log_dir: Path | None = None,
     mode: str,
     timeout: int,
     container_name: str,
     profile: str = "default",
     php_version: str = "8.3",
+    keep_name: bool = False,
+    stage_file: Path | None = None,
+    gvisor: bool = False,
 ) -> list[str]:
+    del log_dir  # logs are copied out after the run; never bind-mounted
     if profile not in SANDBOX_PROFILES:
         profile = "default"
-    return [
+    sample_name = sample.name if keep_name else "sample.php"
+    if "/" in sample_name or sample_name in {".", ".."} or not sample_name:
+        sample_name = "sample.php"
+    dst = f"/samples/{sample_name}"
+    args = [
         "docker",
         "run",
-        "--rm",
         "--name",
         container_name,
         "--network",
         "none",
+        "--read-only",
         "--memory",
         "512m",
         "--memory-swap",
@@ -109,6 +125,22 @@ def docker_run_args(
         "128",
         "--cap-drop",
         "ALL",
+        "--cap-add",
+        "NET_ADMIN",
+        "--cap-add",
+        "NET_RAW",
+        "--cap-add",
+        "NET_BIND_SERVICE",
+        "--cap-add",
+        "SETUID",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "FOWNER",
+        "--cap-add",
+        "DAC_OVERRIDE",
         "--security-opt",
         "no-new-privileges",
         "--env",
@@ -116,42 +148,93 @@ def docker_run_args(
         "--env",
         f"SANDBOX_TIMEOUT={timeout}",
         "--env",
-        "SANDBOX_LOGS=/logs",
-        "--env",
         f"SANDBOX_PROFILE={profile}",
         "--env",
         f"SANDBOX_PHP_VERSION={php_version}",
+        "--env",
+        f"SANDBOX_SAMPLE={dst}",
         "--mount",
-        f"type=bind,src={sample},dst=/samples/sample.php,readonly=true",
+        f"type=bind,src={sample},dst={dst},readonly=true",
         "--mount",
-        f"type=bind,src={log_dir},dst=/logs",
+        "type=tmpfs,destination=/logs,tmpfs-mode=1777",
         "--mount",
-        "type=tmpfs,destination=/tmp",
-        tag,
-        "/samples/sample.php",
+        "type=tmpfs,destination=/tmp,tmpfs-mode=1777",
+        "--mount",
+        "type=tmpfs,destination=/run,tmpfs-mode=1777",
     ]
+    if stage_file is not None:
+        args.extend(
+            [
+                "--mount",
+                f"type=bind,src={stage_file.resolve()},dst=/opt/sandbox/stage.bin,readonly=true",
+            ]
+        )
+    if gvisor:
+        args[2:2] = ["--runtime", "runsc"]
+    args.extend([tag, dst])
+    return args
+
+
+def _is_safe_regular_file(path: Path, root: Path) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _reject_symlinks(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_symlink():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _safe_read_text(path: Path, root: Path) -> str:
+    if not _is_safe_regular_file(path, root):
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _safe_write_text(path: Path, text: str, root: Path) -> None:
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise SandboxError(f"refusing to write outside log dir: {path}") from exc
+    if path.is_symlink() or path.parent.is_symlink():
+        raise SandboxError(f"refusing to write through a symlink: {path}")
+    path.write_text(text, encoding="utf-8")
 
 
 def finalize_logs(log_dir: Path) -> tuple[list[str], list[Path]]:
+    log_dir = log_dir.resolve()
+    _reject_symlinks(log_dir)
     domains: set[str] = set()
     domains_file = log_dir / "domains.txt"
-    if domains_file.exists():
+    if _is_safe_regular_file(domains_file, log_dir):
         domains.update(
             line.strip().lower()
-            for line in domains_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in _safe_read_text(domains_file, log_dir).splitlines()
             if line.strip()
         )
     dns_log = log_dir / "dns.log"
-    if dns_log.exists():
-        for line in dns_log.read_text(encoding="utf-8", errors="replace").splitlines():
+    if _is_safe_regular_file(dns_log, log_dir):
+        for line in _safe_read_text(dns_log, log_dir).splitlines():
             match = QUERY_RE.search(line)
             if match:
                 host = match.group(1).rstrip(".").lower()
                 if host and host not in {".", "localhost"}:
                     domains.add(host)
     http_jsonl = log_dir / "http.jsonl"
-    if http_jsonl.exists():
-        for line in http_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+    if _is_safe_regular_file(http_jsonl, log_dir):
+        for line in _safe_read_text(http_jsonl, log_dir).splitlines():
             if not line.strip():
                 continue
             try:
@@ -161,22 +244,29 @@ def finalize_logs(log_dir: Path) -> tuple[list[str], list[Path]]:
             host = str(rec.get("host") or "").split(":")[0].lower()
             if host:
                 domains.add(host)
-    dumps = sorted(log_dir.glob("eval-*.php"))
+    dumps = sorted(
+        p
+        for p in list(log_dir.glob("eval-*.php")) + list(log_dir.glob("php/eval-*.php"))
+        if _is_safe_regular_file(p, log_dir)
+    )
     summary = {
         "domains": sorted(domains),
         "eval_dumps": [p.name for p in dumps],
     }
-    (log_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    domains_file.write_text("".join(d + "\n" for d in sorted(domains)), encoding="utf-8")
+    _safe_write_text(log_dir / "summary.json", json.dumps(summary, indent=2) + "\n", log_dir)
+    if domains_file.exists() and domains_file.is_symlink():
+        domains_file.unlink()
+    _safe_write_text(domains_file, "".join(d + "\n" for d in sorted(domains)), log_dir)
     return sorted(domains), dumps
 
 
 def collect_http(log_dir: Path) -> list[dict]:
+    log_dir = log_dir.resolve()
     http_jsonl = log_dir / "http.jsonl"
-    if not http_jsonl.exists():
+    if not _is_safe_regular_file(http_jsonl, log_dir):
         return []
     rows: list[dict] = []
-    for line in http_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in _safe_read_text(http_jsonl, log_dir).splitlines():
         if not line.strip():
             continue
         try:
@@ -193,10 +283,28 @@ def collect_http(log_dir: Path) -> list[dict]:
     return rows
 
 
-def _best_source(sample: Path, dumps: list[Path]) -> str:
-    if dumps:
-        return dumps[-1].read_text(encoding="utf-8", errors="replace")
-    return sample.read_text(encoding="utf-8", errors="replace")
+def collect_tcp(log_dir: Path) -> list[dict]:
+    log_dir = log_dir.resolve()
+    path = log_dir / "tcp.jsonl"
+    if not _is_safe_regular_file(path, log_dir):
+        return []
+    rows: list[dict] = []
+    for line in _safe_read_text(path, log_dir).splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _copy_container_logs(container_name: str, log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    proc = _run(["docker", "cp", f"{container_name}:/logs/.", str(log_dir)], timeout=60)
+    if proc.returncode != 0:
+        (log_dir / "docker.cp.err").write_text(proc.stderr or proc.stdout or "", encoding="utf-8")
+    _reject_symlinks(log_dir)
 
 
 def run_php_sandbox(
@@ -207,6 +315,8 @@ def run_php_sandbox(
     timeout: int = 15,
     php_version: str = "8.3",
     profile: str = "default",
+    keep_name: bool = False,
+    stage_file: Path | None = None,
 ) -> SandboxResult:
     if shutil.which("docker") is None:
         raise SandboxError("docker is not installed or not on PATH.")
@@ -216,6 +326,12 @@ def run_php_sandbox(
     sample = sample.resolve()
     if not sample.is_file():
         raise SandboxError(f"sample not found: {sample}")
+    if sample.is_symlink():
+        raise SandboxError(f"refusing to run a symlinked sample: {sample}")
+    if stage_file is not None:
+        stage_file = stage_file.resolve()
+        if not stage_file.is_file() or stage_file.is_symlink():
+            raise SandboxError(f"stage file not found or is a symlink: {stage_file}")
 
     context = sandbox_context_dir()
     dockerfile = sandbox_dockerfile(php_version)
@@ -229,12 +345,14 @@ def run_php_sandbox(
     args = docker_run_args(
         tag=tag,
         sample=sample,
-        log_dir=log_dir,
         mode=mode,
         timeout=timeout,
         container_name=container_name,
         profile=profile,
         php_version=php_version,
+        keep_name=keep_name,
+        stage_file=stage_file,
+        gvisor=docker_has_runtime("runsc"),
     )
     host_timeout = timeout + 90
     proc: subprocess.CompletedProcess[str] | None = None
@@ -243,8 +361,11 @@ def run_php_sandbox(
         proc = _run(args, timeout=host_timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _run(["docker", "rm", "-f", container_name], timeout=30)
+        _run(["docker", "kill", container_name], timeout=30)
+    try:
+        _copy_container_logs(container_name, log_dir)
     finally:
+        _run(["docker", "rm", "-f", container_name], timeout=30)
         rmi = _run(["docker", "rmi", "-f", tag], timeout=60)
         if rmi.returncode != 0:
             (log_dir / "docker.rmi.err").write_text(rmi.stderr or "", encoding="utf-8")
@@ -259,10 +380,23 @@ def run_php_sandbox(
         status = -1
 
     domains, dumps = finalize_logs(log_dir)
-    original = sample.read_text(encoding="utf-8", errors="replace")
-    source = _best_source(sample, dumps)
+    original = sample.read_text(encoding="latin-1", errors="replace")
+    extra_layers: list[tuple[str, str]] = []
+    dump_texts: list[str] = []
+    for index, dump in enumerate(dumps, start=1):
+        text = _safe_read_text(dump, log_dir)
+        dump_texts.append(text)
+        extra_layers.append((f"eval-dump-{index}", text))
+    source = dump_texts[-1] if dump_texts else original
     static = deobfuscate(original, language="php", path=str(sample), php_version=php_version)
-    cleaned = deobfuscate(source, language="php", path=str(sample), surface_text=original, php_version=php_version)
+    cleaned = deobfuscate(
+        source,
+        language="php",
+        path=str(sample),
+        surface_text=original,
+        php_version=php_version,
+        extra_layers=extra_layers[:-1] if extra_layers else None,
+    )
     from evilbox.pipeline import cross_check_layers
 
     cross = cross_check_layers(original_inner=static.text, dump_text=source, static_text=cleaned.text)
@@ -270,8 +404,12 @@ def run_php_sandbox(
         cleaned.warnings.append("static inner disagrees with sandbox dump layer")
     cleaned.sandbox_cross_check = cross
     http = collect_http(log_dir)
-    (log_dir / "deobfuscated.php").write_text(cleaned.text, encoding="utf-8")
-    (log_dir / "cross-check.json").write_text(json.dumps(cross, indent=2) + "\n", encoding="utf-8")
+    tcp = collect_tcp(log_dir)
+    out_php = log_dir / "deobfuscated.php"
+    if out_php.is_symlink():
+        out_php.unlink()
+    _safe_write_text(out_php, cleaned.text, log_dir)
+    _safe_write_text(log_dir / "cross-check.json", json.dumps(cross, indent=2) + "\n", log_dir)
     if timed_out:
         raise SandboxError(f"sandbox timed out after {host_timeout}s; logs kept at {log_dir}")
     return SandboxResult(
@@ -283,6 +421,7 @@ def run_php_sandbox(
         image_tag=tag,
         http=http,
         analysis=cleaned,
+        tcp=tcp,
     )
 
 

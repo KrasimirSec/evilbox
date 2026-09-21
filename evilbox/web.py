@@ -33,15 +33,7 @@ MAX_CONCURRENT = 4
 INDEX_PATH = Path(__file__).with_name("web_index.html")
 
 _SLOT = threading.BoundedSemaphore(MAX_CONCURRENT)
-_WORKER = (
-    "import json,sys; from evilbox.web import decode_payload, WebError;\n"
-    "payload=json.load(sys.stdin)\n"
-    "try:\n"
-    "    json.dump(decode_payload(**payload), sys.stdout)\n"
-    "except WebError as exc:\n"
-    "    json.dump({'__web_error': True, 'message': exc.message, 'status': exc.status}, sys.stdout)\n"
-    "    sys.exit(2)\n"
-)
+_WORKER = "from evilbox.web import worker_entry; worker_entry()\n"
 
 EXAMPLES: list[dict[str, str]] = [
     {
@@ -66,6 +58,40 @@ EXAMPLES: list[dict[str, str]] = [
         "source": "<?php eval($_POST['x']);\n",
     },
 ]
+
+
+def apply_resource_limits() -> None:
+    """Best-effort rlimits for the decode subprocess (Linux)."""
+    try:
+        import resource
+    except ImportError:
+        return
+    timeout = max(1, int(DECODE_TIMEOUT))
+    mem = 512 * 1024 * 1024
+    limits = (
+        (resource.RLIMIT_AS, (mem, mem)),
+        (resource.RLIMIT_DATA, (mem, mem)),
+        (resource.RLIMIT_CPU, (timeout, timeout + 1)),
+        (resource.RLIMIT_CORE, (0, 0)),
+        (resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024)),
+        (resource.RLIMIT_NOFILE, (256, 256)),
+        (resource.RLIMIT_NPROC, (32, 32)),
+    )
+    for name, value in limits:
+        try:
+            resource.setrlimit(name, value)
+        except (ValueError, OSError):
+            continue
+
+
+def worker_entry() -> None:
+    apply_resource_limits()
+    payload = json.load(sys.stdin)
+    try:
+        json.dump(decode_payload(**payload), sys.stdout)
+    except WebError as exc:
+        json.dump({"__web_error": True, "message": exc.message, "status": exc.status}, sys.stdout)
+        sys.exit(2)
 
 
 class WebError(Exception):
@@ -341,9 +367,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         if extra:
             for key, value in extra.items():
                 self.send_header(key, value)

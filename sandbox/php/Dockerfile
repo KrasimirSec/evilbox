@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-cryptography \
         tcpdump \
+        iproute2 \
+        iptables \
+        util-linux \
         zlib1g-dev \
     && docker-php-ext-install curl zip \
     && rm -rf /var/lib/apt/lists/*
@@ -27,9 +30,9 @@ RUN cd /usr/src/php-eval-hook \
     && rm -rf /usr/src/php-eval-hook
 
 COPY php-sandbox.ini /usr/local/etc/php/conf.d/zz-sandbox.ini
-COPY entrypoint.sh prepend.php wp-stubs.php sink.py collect_domains.py dnsmasq.conf sleep_hook.c /opt/sandbox/
+COPY entrypoint.sh prepend.php wp-stubs.php sink.py collect_domains.py tcp_logger.py dnsmasq.conf sleep_hook.c /opt/sandbox/
 RUN gcc -shared -fPIC -O2 -o /opt/sandbox/nosleep.so /opt/sandbox/sleep_hook.c \
-    && chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/sink.py /opt/sandbox/collect_domains.py \
+    && chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/sink.py /opt/sandbox/collect_domains.py /opt/sandbox/tcp_logger.py \
     && mkdir -p /logs /samples /tmp/ca
 
 ENTRYPOINT ["/opt/sandbox/entrypoint.sh"]

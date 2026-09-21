@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from evilbox.parsers import parse_js, parse_php
-from evilbox.rewrite import node_text, walk
+from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, walk
 
 WRAPPER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eval\s*\(\s*gzinflate\s*\(\s*base64_decode\s*\([^)]{0,80}", re.I),
@@ -21,7 +21,7 @@ WRAPPER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:include|require)(?:_once)?\s*\(\s*base64_decode\s*\([^)]{0,80}", re.I),
 )
 
-STRING_LIT_RE = re.compile(r"""(['\"])(?:\\.|(?!\1).){8,}\1""", re.S)
+STRING_LIT_RE = re.compile(r"'(?:[^'\\]|\\.){8,}'|\"(?:[^\"\\]|\\.){8,}\"", re.S)
 PHP_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]{3,40})")
 JS_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,40})\b")
 COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]{8,}|#[^\n]{8,}", re.S)
@@ -273,9 +273,19 @@ def extract_surface(source: str, *, language: str) -> SurfaceSignatures:
                 continue
             add("identifier", name, "stable identifier in the original file")
 
+    token = use_source_encoding(source)
     try:
         tree = parse_php(source) if language == "php" else parse_js(source)
         for node in walk(tree.root_node):
+            if node.type in {"string", "encapsed_string", "string_literal"}:
+                raw = node_text(source, node)
+                if len(raw) >= 10 and raw[0] in "'\"" and raw[-1] == raw[0]:
+                    inner = raw[1:-1]
+                    if not _skip_literal(inner):
+                        why = "packed blob / distinctive string in the original file"
+                        if len(inner) >= 80:
+                            why = "long payload string a scanner can match without unpacking"
+                        add("string", inner, why)
             if node.type in {"function_definition", "function_declaration", "method_declaration"}:
                 name_node = node.child_by_field_name("name")
                 if name_node is None:
@@ -285,6 +295,8 @@ def extract_surface(source: str, *, language: str) -> SurfaceSignatures:
                     add("function", name, "function name declared in the original file")
     except Exception:
         pass
+    finally:
+        reset_source_encoding(token)
 
     # Prefer longer / wrapper items first; cap for analysts.
     def rank(item: SurfaceItem) -> tuple:

@@ -19,7 +19,17 @@ from evilbox.decode import (
     unescape_js_string_body,
 )
 from evilbox.parsers import parse_js
-from evilbox.rewrite import apply_replacements, node_text, stmt_span, walk
+from evilbox.rewrite import (
+    apply_replacements,
+    enclosing_function_id,
+    inside_branch,
+    inside_loop,
+    node_text,
+    reset_source_encoding,
+    stmt_span,
+    use_source_encoding,
+    walk,
+)
 
 JS_JUNK_RE = re.compile(r"^_0x[0-9a-fA-F]+$")
 JS_HEX_NAME_RE = re.compile(r"^_?[a-f0-9]{6,}$", re.I)
@@ -111,13 +121,33 @@ class DecoderInfo:
     encoding: str = "none"
 
 
+ScopeKey = tuple[int, str]
+
+
 @dataclass
 class FoldEnv:
-    arrays: dict[str, list[Value]] = field(default_factory=dict)
-    scalars: dict[str, Value] = field(default_factory=dict)
+    arrays: dict[ScopeKey, list[Value]] = field(default_factory=dict)
+    named_arrays: dict[str, list[Value]] = field(default_factory=dict)
+    scalars: dict[ScopeKey, Value] = field(default_factory=dict)
     decoders: dict[str, DecoderInfo] = field(default_factory=dict)
-    concat_rhs: dict[str, object] = field(default_factory=dict)
-    concat_extra: dict[str, list] = field(default_factory=dict)
+    concat_rhs: dict[ScopeKey, object] = field(default_factory=dict)
+    concat_extra: dict[ScopeKey, list] = field(default_factory=dict)
+
+    def key(self, node, name: str) -> ScopeKey:
+        return (enclosing_function_id(node), name)
+
+    def has_named_array(self, name: str) -> bool:
+        if name in self.named_arrays:
+            return True
+        return any(key[1] == name for key in self.arrays)
+
+    def array_by_name(self, name: str) -> list[Value] | None:
+        if name in self.named_arrays:
+            return self.named_arrays[name]
+        for key, items in self.arrays.items():
+            if key[1] == name:
+                return items
+        return None
 
 
 KNOWN_GLOBALS = {
@@ -141,40 +171,50 @@ KNOWN_GLOBALS = {
 
 def transform_js(source: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
-    tree = parse_js(source)
-    env = collect_env(tree, source)
-    replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, js_quote))
-    for node in walk(tree.root_node):
-        rendered = _render_if_simplified(node, source, env)
-        if rendered is None:
-            continue
-        original = node_text(source, node)
-        if rendered != original:
-            replacements.append((node.start_byte, node.end_byte, rendered))
-    text = apply_replacements(source, replacements)
-    text = _rename_junk(text)
-    return text, warnings
+    token = use_source_encoding(source)
+    try:
+        tree = parse_js(source)
+        env = collect_env(tree, source)
+        replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, js_quote))
+        for node in walk(tree.root_node):
+            rendered = _render_if_simplified(node, source, env)
+            if rendered is None:
+                continue
+            original = node_text(source, node)
+            if rendered != original:
+                replacements.append((node.start_byte, node.end_byte, rendered))
+        text = apply_replacements(source, replacements)
+        text = _rename_junk(text)
+        return text, warnings
+    finally:
+        reset_source_encoding(token)
 
 
 def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
     """Map `var name = [literals...]` so later `name[i]` can be folded."""
-    return collect_env(tree, source).arrays
+    env = collect_env(tree, source)
+    out = dict(env.named_arrays)
+    for (_scope, name), items in env.arrays.items():
+        out.setdefault(name, items)
+    return out
 
 
 def collect_env(tree, source: str) -> FoldEnv:
     env = FoldEnv()
-    assign_count: dict[str, int] = {}
+    assign_count: dict[ScopeKey, int] = {}
     for node in walk(tree.root_node):
         if node.type == "variable_declarator":
             name_node = node.child_by_field_name("name")
             if name_node is not None and name_node.type == "identifier":
                 name = node_text(source, name_node)
-                assign_count[name] = assign_count.get(name, 0) + 1
+                key = env.key(name_node, name)
+                assign_count[key] = assign_count.get(key, 0) + 1
         elif node.type == "assignment_expression":
             left = node.child_by_field_name("left")
             if left is not None and left.type == "identifier":
                 name = node_text(source, left)
-                assign_count[name] = assign_count.get(name, 0) + 1
+                key = env.key(left, name)
+                assign_count[key] = assign_count.get(key, 0) + 1
 
     for node in walk(tree.root_node):
         if node.type != "variable_declarator":
@@ -184,7 +224,10 @@ def collect_env(tree, source: str) -> FoldEnv:
         if name_node is None or value is None or name_node.type != "identifier":
             continue
         name = node_text(source, name_node)
-        if assign_count.get(name, 0) != 1:
+        key = env.key(name_node, name)
+        if assign_count.get(key, 0) != 1:
+            continue
+        if inside_loop(node) or inside_branch(node):
             continue
         if value.type == "array":
             elems: list[Value] = []
@@ -196,16 +239,16 @@ def collect_env(tree, source: str) -> FoldEnv:
                     break
                 elems.append(item)
             if ok:
-                env.arrays[name] = elems
+                env.arrays[key] = elems
             continue
         if value.type == "identifier" and node_text(source, value) in KNOWN_GLOBALS:
-            env.scalars[name] = Value(node_text(source, value), splice_raw=True)
+            env.scalars[key] = Value(node_text(source, value), splice_raw=True)
             continue
         item = const_eval(value, source, env)
         if item is not None and not item.splice_raw:
-            env.scalars[name] = item
-            env.concat_rhs[name] = value
-            env.concat_extra[name] = []
+            env.scalars[key] = item
+            env.concat_rhs[key] = value
+            env.concat_extra[key] = []
 
     for node in walk(tree.root_node):
         if node.type != "augmented_assignment_expression":
@@ -217,13 +260,19 @@ def collect_env(tree, source: str) -> FoldEnv:
         if left is None or right is None or left.type != "identifier" or op != "+=":
             continue
         name = node_text(source, left)
-        prev = env.scalars.get(name)
+        key = env.key(left, name)
+        if inside_loop(node) or inside_branch(node) or assign_count.get(key, 0) != 1:
+            env.scalars.pop(key, None)
+            env.concat_rhs.pop(key, None)
+            env.concat_extra.pop(key, None)
+            continue
+        prev = env.scalars.get(key)
         item = const_eval(right, source, env)
         if prev is not None and item is not None and isinstance(prev.py, str) and isinstance(item.py, str):
-            env.scalars[name] = Value(prev.py + item.py)
-            env.concat_extra.setdefault(name, []).append(node)
-        elif name in env.scalars and (item is None or not isinstance(item.py, str)):
-            env.scalars.pop(name, None)
+            env.scalars[key] = Value(prev.py + item.py)
+            env.concat_extra.setdefault(key, []).append(node)
+        elif key in env.scalars and (item is None or not isinstance(item.py, str)):
+            env.scalars.pop(key, None)
 
     _collect_array_functions(tree, source, env)
     _rotate_string_arrays(tree, source, env)
@@ -264,7 +313,10 @@ def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
         if args[0].type != "identifier":
             continue
         arr_name = node_text(source, args[0])
-        if arr_name not in env.arrays:
+        items = env.named_arrays.get(arr_name)
+        if items is None:
+            items = env.arrays.get(env.key(args[0], arr_name))
+        if items is None:
             continue
         count_val = const_eval(args[1], source, env)
         if count_val is None or not _is_num(count_val.py):
@@ -281,12 +333,16 @@ def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
             rot = n
         else:
             rot = n
-        items = env.arrays[arr_name]
+        items = items
         if not items:
             continue
         rot %= len(items)
         if rot:
-            env.arrays[arr_name] = items[rot:] + items[:rot]
+            rotated = items[rot:] + items[:rot]
+            if arr_name in env.named_arrays:
+                env.named_arrays[arr_name] = rotated
+            else:
+                env.arrays[env.key(args[0], arr_name)] = rotated
 
 
 def _collect_array_functions(tree, source: str, env: FoldEnv) -> None:
@@ -298,7 +354,7 @@ def _collect_array_functions(tree, source: str, env: FoldEnv) -> None:
         if name_node is None:
             continue
         name = node_text(source, name_node)
-        if name in env.arrays:
+        if name in env.named_arrays:
             continue
         body = node.child_by_field_name("body")
         if body is None:
@@ -318,7 +374,7 @@ def _collect_array_functions(tree, source: str, env: FoldEnv) -> None:
             if ok and elems and (best is None or len(elems) > len(best)):
                 best = elems
         if best:
-            env.arrays[name] = best
+            env.named_arrays[name] = best
 
 
 def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
@@ -354,26 +410,26 @@ def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
             offset_txt = match.group(3) or (match.group(5) if match.lastindex and match.lastindex >= 5 else "0")
         if not arr:
             found = re.findall(r"return\s+([A-Za-z_$][\w$]*)\s*\[", text)
-            arr = next((n for n in found if n in env.arrays), None)
+            arr = next((n for n in found if env.has_named_array(n)), None)
         if not arr:
             found = re.findall(
                 r"(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)",
                 text,
             )
             for local, callee in found:
-                if callee in env.arrays:
+                if env.has_named_array(callee):
                     arr = callee
                     break
-                if local in env.arrays:
+                if env.has_named_array(local):
                     arr = local
                     break
         if not arr:
             found = re.findall(r"([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\[", text)
-            arr = next((n for n in found if n in env.arrays), None)
+            arr = next((n for n in found if env.has_named_array(n)), None)
         if not arr:
             found = re.findall(r"return\s+([A-Za-z_$][\w$]*)\s*[;\n}]", text)
             for cand in found:
-                if cand in env.arrays:
+                if env.has_named_array(cand):
                     arr = cand
                     break
             if not arr:
@@ -382,19 +438,19 @@ def _collect_array_decoders(tree, source: str, env: FoldEnv) -> None:
                     text,
                 )
                 for _local, callee in indexed:
-                    if callee in env.arrays:
+                    if env.has_named_array(callee):
                         arr = callee
                         break
         if not func or not arr:
             continue
-        if arr not in env.arrays:
+        if not env.has_named_array(arr):
             alias = re.search(
                 r"(?:var|let|const)\s+" + re.escape(arr) + r"\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)",
                 text,
             )
-            if alias and alias.group(1) in env.arrays:
+            if alias and env.has_named_array(alias.group(1)):
                 arr = alias.group(1)
-        if arr not in env.arrays:
+        if not env.has_named_array(arr):
             continue
         try:
             offset = int(offset_txt, 0) if offset_txt else 0
@@ -498,6 +554,10 @@ def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str 
         "new_expression",
         "template_string",
     }:
+        if node.type == "binary_expression" and _binary_op(node) == "+":
+            parent = node.parent
+            if parent is not None and parent.type == "binary_expression" and _binary_op(parent) == "+":
+                return None
         val = const_eval(node, source, env)
         if val is None:
             return None
@@ -558,9 +618,7 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(None)
     if t == "identifier" and env is not None:
         name = node_text(source, node)
-        if name in env.scalars:
-            return env.scalars[name]
-        return None
+        return env.scalars.get(env.key(node, name))
     if t == "parenthesized_expression":
         inner = node.named_children[0] if node.named_children else None
         return const_eval(inner, source, env) if inner is not None else None
@@ -639,7 +697,10 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
                 return None
             elems.append(item)
     elif obj.type == "identifier" and env is not None:
-        elems = env.arrays.get(node_text(source, obj))
+        name = node_text(source, obj)
+        elems = env.arrays.get(env.key(obj, name))
+        if elems is None:
+            elems = env.array_by_name(name)
     if elems is not None:
         if idx < 0 or idx >= len(elems):
             return None
@@ -706,26 +767,58 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     return None
 
 
+def _binary_op(node) -> str | None:
+    op_node = node.child_by_field_name("operator")
+    if op_node is not None:
+        return op_node.type
+    for child in node.children:
+        if not child.is_named:
+            return child.type
+    return None
+
+
+def _eval_js_concat_chain(node, source: str, env: FoldEnv | None) -> Value | None:
+    pieces = []
+    cur = node
+    while cur is not None and cur.type == "binary_expression" and _binary_op(cur) == "+":
+        right = cur.child_by_field_name("right")
+        left = cur.child_by_field_name("left")
+        if right is None or left is None:
+            return None
+        pieces.append(right)
+        cur = left
+    pieces.append(cur)
+    values = []
+    for part in reversed(pieces):
+        val = const_eval(part, source, env)
+        if val is None or val.splice_raw:
+            return None
+        values.append(val)
+    if all(isinstance(v.py, str) for v in values):
+        return Value("".join(v.py for v in values))
+    acc = values[0]
+    for nxt in values[1:]:
+        if isinstance(acc.py, str) or isinstance(nxt.py, str):
+            acc = Value(str(acc.py) + str(nxt.py))
+        elif _is_num(acc.py) and _is_num(nxt.py):
+            acc = Value(acc.py + nxt.py)
+        else:
+            return None
+    return acc
+
+
 def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
+    op = _binary_op(node)
+    if op == "+":
+        return _eval_js_concat_chain(node, source, env)
     left = node.child_by_field_name("left")
     right = node.child_by_field_name("right")
-    op_node = node.child_by_field_name("operator")
-    op = op_node.type if op_node is not None else None
-    if op is None:
-        for child in node.children:
-            if not child.is_named:
-                op = child.type
-                break
     if left is None or right is None or op is None:
         return None
     lv = const_eval(left, source, env)
     rv = const_eval(right, source, env)
     if lv is None or rv is None or lv.splice_raw or rv.splice_raw:
         return None
-    if op == "+" and isinstance(lv.py, str) and isinstance(rv.py, str):
-        return Value(lv.py + rv.py)
-    if op == "+" and _is_num(lv.py) and _is_num(rv.py):
-        return Value(lv.py + rv.py)
     if op in {"^", "&", "|", "<<", ">>", ">>>"} and _is_num(lv.py) and _is_num(rv.py):
         a, b = int(lv.py), int(rv.py)
         if op == "^":
@@ -738,7 +831,7 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return Value(a << (b & 31))
         if op == ">>>":
             return Value((a & 0xFFFFFFFF) >> (b & 31))
-        return Value(a >> b)
+        return Value(a >> (b & 31))
     if op in {"-", "*", "/", "%"} and _is_num(lv.py) and _is_num(rv.py):
         try:
             if op == "-":
@@ -784,8 +877,8 @@ def _callee(node, source: str, env: FoldEnv | None) -> tuple[str | None, str | N
         return None, None, None
     if fn.type == "identifier":
         name = node_text(source, fn)
-        if env is not None and name in env.scalars and isinstance(env.scalars[name].py, str):
-            alias = env.scalars[name]
+        alias = env.scalars.get(env.key(fn, name)) if env is not None else None
+        if alias is not None and isinstance(alias.py, str):
             if alias.splice_raw or alias.py in KNOWN_GLOBALS or name in env.decoders or alias.py in env.decoders:
                 return str(alias.py), None, None
         return name, None, None
@@ -899,7 +992,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
     if env is not None and obj is not None and prop is None and obj in env.decoders:
         info = env.decoders[obj]
-        items = env.arrays.get(info.array) or []
+        items = env.array_by_name(info.array) or []
         raw_idx = values[0].py if values else None
         idx = _js_int(raw_idx)
         if idx is None:

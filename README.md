@@ -43,14 +43,16 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--report PATH` | JSON report (`evilbox.report.v1`) |
 | `--html PATH` | HTML report |
 | `--max-passes N` | Unwrap/fold iterations (default: 16) |
-| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image (default: 8.3) |
+| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Static folds default to 8.3; `--sandbox observe` defaults to 7.4 so `assert` strings, `create_function`, and `preg_replace /e` still run |
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
 | `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape inside the sandbox |
+| `--keep-name` | Mount the sample under its original filename inside the sandbox |
+| `--stage-file PATH` | Bytes the sandbox HTTP/HTTPS sink serves instead of `OK` (second-stage replay) |
 | `--logs-dir PATH` | Sandbox log root (default: `EVILBOX_LOGS` or `./sandbox-logs`) |
 | `--timeout N` | Sandbox PHP timeout in seconds (default: 15) |
 | `serve` | Local web UI + JSON API for paste/upload decoding |
 
-If the input is a directory, Evilbox walks `.js` / `.php` files, writes `*.clean.*` plus `*.report.json`, and a `clusters.json` map of similar inner layers (token n-gram minhash, so a changed domain or key still groups a family). `cluster_sha256` remains an exact whitespace-normalized hash of the inner text.
+If the input is a directory, Evilbox walks `.js` / `.php` files and mirrors the relative layout under the output directory (`a/index.php` and `b/index.php` become `a/index.clean.php` and `b/index.clean.php`). Each file is decoded in isolation: a crash in one sample does not abort the batch. `clusters.json` groups similar inner layers with a token n-gram minhash (so a changed domain or key still groups a family). `cluster_sha256` remains an exact whitespace-normalized hash of the inner text.
 
 `-o clean.js` also writes `clean.iocs.json` and `clean.report.json` unless `--report` is set.
 
@@ -89,7 +91,7 @@ curl --data-binary @packed.php -H 'Content-Type: text/plain' \
   'http://127.0.0.1:8080/api/decode?lang=php&filename=packed.php'
 ```
 
-The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). The timeout is enforced by killing a **subprocess** (a worker thread cannot interrupt a catastrophic regex).
+The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). Each decode runs in a **subprocess** with CPU/address rlimits; a hang is killed with SIGKILL (a worker thread cannot interrupt a catastrophic regex). The UI is same-origin: there is no `Access-Control-Allow-Origin: *`.
 
 The no-argument menu also has **Open the web decoder**.
 
@@ -112,7 +114,7 @@ Roles are **multi-label** and evidence-backed. A sample can be a webshell and a 
 
 Capabilities behind those labels include `eval-runtime`, `exec`, `superglobals`, `fs-write`, `fs-read`, `fs-delete`, `net-egress`, `persist`, `seo-inject`, `mail`, `credential-harvest`, `miner`, `phishing`, `payload-drop`, and `include-remote`.
 
-These are static (and sandbox-augmented) rules, not AV family names. Treat scores as hints and read the evidence.
+These are static (and sandbox-augmented) rules, not AV family names. Treat scores as hints and read the evidence. Matching is done on **call nodes** in the parse tree, not raw text, so strings and comments (a WordPress `<input type="password">`, a cache plugin's `file_get_contents` of a local file) do not become stealers or droppers. `file_get_contents` is file-read unless the argument is a URL.
 
 ## Reports
 
@@ -120,7 +122,7 @@ JSON schema id: `evilbox.report.v1`. Fields include:
 
 - **sample** — path, language, SHA-256 of the original file, SHA-256 of the inner layer, `cluster_sha256` (exact normalized inner code), `cluster_minhash` (structure minhash for fuzzy families)
 - **packer** — hints such as `eval+base64`, `fromCharCode`, `preg_replace/e`
-- **layers** — original → unwrap passes → inner (sandbox eval dumps are their own layer). Each layer lists `unresolved_folds`
+- **layers** — original → unwrap passes → inner (every sandbox eval dump is its own layer). Each layer lists `unresolved_folds`
 - **unresolved_folds** — decoder/packer/dispatch calls that did not simplify, grouped per layer; remote loader URLs are unresolved stages
 - **encoded_not_analyzable** — ionCube, Zend Guard, or SourceGuardian headers (`encoded, not analyzable`)
 - **failed_folds** — true when the inner layer still has decoder/packer leftovers
@@ -180,24 +182,33 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 
 **Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample; EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
 
-`gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 8 MiB.
+`gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 2 MiB. Incomplete streams are refused (no unbounded `flush()`).
 
-Codecs that model PHP strings (`~`, XOR, `stripslashes`) treat values as bytes. Characters above U+00FF are an error, not replaced with `?`. `convert_uudecode` line-padding retries are marked **recovered**. `substr` past the end of the string follows the selected `--php-version` (empty string on PHP 8, `false` on PHP 5/7).
+PHP constant folding is **assigned-once per function**, matching the JS `assign_count` rule. A later `$a = 'strrev'` does not rewrite an earlier `$a('aGVsbG8=')`. Straight-line `$s .= ...` / JS `s += ...` chains fold; assignments inside `for` / `foreach` / `while` or `if` / `switch` do not. Variables touched by `global`, references, `extract`, `compact`, `parse_str`, or `foreach` are skipped.
+
+Codecs that model PHP strings (`~`, XOR, `stripslashes`, `substr`, `strrev`, `ord`, `strtr`, `strtoupper`) treat values as **bytes** (latin-1). Characters above U+00FF are an error, not replaced with `?`. `convert_uudecode` line-padding retries are marked **recovered**. `substr` past the end of the string follows the selected `--php-version` (empty string on PHP 8, `false` on PHP 5/7). Integer-looking floats stringify as PHP does (`6.0` → `6`). Shifts of 63 bits or more, and integers wider than 256 bits, are left unfolded.
 
 Not included: running a JavaScript or PHP engine over HTTP. The optional Docker sandbox remains CLI-only.
 
 ## PHP sandbox (evalhook, no real internet)
 
-Optional Docker lab for packed PHP. Each run **builds a throwaway image tag, starts a new container with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`, then deletes the container and image tag**. Docker’s default seccomp profile stays enabled. The sample is mounted read-only. Nothing from the run is committed back into an image.
+Optional Docker lab for packed PHP. Each run **builds a throwaway image tag, starts a new container with `--network none`, `--read-only`, `--cap-drop ALL` plus the setup caps (`NET_ADMIN`, `NET_RAW`, `NET_BIND_SERVICE`, …), `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`**. Docker’s default seccomp profile stays enabled. If a `runsc` (gVisor) runtime is installed it is used. The sample is bind-mounted read-only. **Logs are not bind-mounted.** After the process exits, the host copies `/logs` with `docker cp` and **rejects symlinks** before reading or writing `domains.txt` / `deobfuscated.php`. The PHP sample runs as uid 65534 with capabilities dropped; dnsmasq, tcpdump, and the HTTP sink start first as root. Nothing from the run is committed back into an image.
 
-`--php-version 8.3` (default), `7.4`, or `5.6` selects the Dockerfile. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
+`--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. Observe mode defaults to **7.4** so string `assert`, `create_function`, and `preg_replace /e` still execute. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
 
-`--sandbox-profile` sets the request the sample sees: `googlebot` (Googlebot UA), `google-referrer`, or `wp-cookie` (WordPress login cookies). WordPress function stubs are prepended. `sleep` / `usleep` / `nanosleep` are hooked to return immediately (LD_PRELOAD, PHP process only).
+`--sandbox-profile` sets the request the sample sees: `googlebot` (Googlebot UA), `google-referrer`, or `wp-cookie` (WordPress login cookies). WordPress function stubs are prepended. `sleep` / `usleep` / `nanosleep` are hooked to return immediately (LD_PRELOAD, PHP process only). `--keep-name` preserves the sample basename inside `/samples`. `--stage-file` is served by the sink instead of `OK`.
 
 Inside the container:
 
-- [php-eval-hook](https://github.com/extremecoders-re/php-eval-hook) dumps every `eval()`
+- [php-eval-hook](https://github.com/extremecoders-re/php-eval-hook) dumps every `eval()` to `/logs/php` (path is hardcoded; `putenv('SANDBOX_LOGS')` cannot redirect it)
+- `SANDBOX_MODE` / `SANDBOX_LOGS` are **not** in the PHP process environment
 - dnsmasq answers **every** DNS name with `127.0.0.1` (no upstream resolvers)
+- `ip route add local 0.0.0.0/0 dev lo` so literal IP C2s hit the sink instead of `ENETUNREACH`
+- an HTTP/HTTPS sink returns **200 OK** (or `--stage-file`) and logs Host/URL/body
+- a catch-all TCP logger (iptables REDIRECT) records miners, SMTP, and reverse-shell ports
+- a **sandbox CA** is generated at start and trusted by PHP `curl` / OpenSSL so HTTPS still completes
+- tcpdump writes `traffic.pcap` on loopback
+- every eval dump is analysed as its own report layer (IOCs are merged)
 - an HTTP/HTTPS sink returns **200 OK** and logs Host/URL/body
 - a **sandbox CA** is generated at start and trusted by PHP `curl` / OpenSSL so HTTPS still completes
 - tcpdump writes `traffic.pcap` on loopback
@@ -222,6 +233,8 @@ Requires Docker. The sample never gets a route to the public internet (`--networ
 ```bash
 pytest
 ```
+
+CI runs the same suite, including the PHP differential probes in `tests/test_decode_fidelity.py` when `php` is on PATH, and Hypothesis property tests when the extra is installed (`pip install -e '.[dev]'`).
 
 ## License
 

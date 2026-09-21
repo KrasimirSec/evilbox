@@ -14,7 +14,8 @@ from dataclasses import dataclass
 _HEX_RE = re.compile(r"^[0-9a-fA-F\s]+$")
 
 # Cap decompressor output so a tiny gzinflate blob cannot fill memory.
-MAX_CODEC_OUTPUT = 8 * 1024 * 1024
+MAX_CODEC_OUTPUT = 2 * 1024 * 1024
+PHP_TRIM_DEFAULT = " \t\n\r\0\x0b"
 
 
 def b64decode(text: str) -> bytes | None:
@@ -101,16 +102,10 @@ def _decompress_limited(data: bytes, wbits: int, max_out: int = MAX_CODEC_OUTPUT
         out = obj.decompress(data, max_out)
     except zlib.error:
         return None
-    if len(out) >= max_out and (obj.unconsumed_tail or not obj.eof):
+    if not obj.eof:
         return None
-    try:
-        tail = obj.flush()
-    except zlib.error:
+    if len(out) > max_out:
         return None
-    if tail:
-        if len(out) + len(tail) > max_out:
-            return None
-        out += tail
     return out
 
 
@@ -122,12 +117,15 @@ def bzip_bytes(data: bytes) -> bytes | None:
     try:
         import bz2
 
-        out = bz2.decompress(data, max_length=MAX_CODEC_OUTPUT)
+        obj = bz2.BZ2Decompressor()
+        out = obj.decompress(data, max_length=MAX_CODEC_OUTPUT)
+        if not obj.eof:
+            return None
+        if len(out) > MAX_CODEC_OUTPUT:
+            return None
+        return out
     except Exception:
         return None
-    if len(out) >= MAX_CODEC_OUTPUT:
-        return None
-    return out
 
 
 def zlib_bytes(data: bytes) -> bytes | None:
@@ -452,9 +450,56 @@ def rc4_crypt(data: bytes, key: bytes) -> bytes | None:
     return bytes(out)
 
 
+def php_strtoupper(text: str) -> str:
+    return "".join(chr(ord(ch) - 32) if "a" <= ch <= "z" else ch for ch in text)
+
+
+def php_strtolower(text: str) -> str:
+    return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in text)
+
+
+def expand_php_charlist(mask: str) -> str:
+    """PHP trim/chop charlist: `a..z` is a range of bytes."""
+    out: list[str] = []
+    i = 0
+    n = len(mask)
+    while i < n:
+        if i + 3 < n and mask[i + 1] == "." and mask[i + 2] == ".":
+            start, end = ord(mask[i]), ord(mask[i + 3])
+            step = 1 if end >= start else -1
+            out.extend(chr(code) for code in range(start, end + step, step))
+            i += 4
+            continue
+        out.append(mask[i])
+        i += 1
+    return "".join(out)
+
+
+def php_str_pad(text: str, width: int, pad: str = " ", style: int = 1) -> str | None:
+    if width < 0 or width > 1_000_000:
+        return None
+    if len(text) >= width:
+        return text
+    if not pad:
+        pad = " "
+    need = width - len(text)
+    fill = (pad * (need // len(pad) + 1))[:need]
+    if style == 0:  # STR_PAD_LEFT
+        return fill + text
+    if style == 2:  # STR_PAD_BOTH
+        left = need // 2
+        return fill[:left] + text + fill[left:]
+    return text + fill
+
+
 def format_php_number(value: float | int) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
+    if isinstance(value, int) and value.bit_length() > 256:
+        raise ValueError("integer too large to fold")
+    try:
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    except ValueError:
+        raise ValueError("integer too large to fold") from None

@@ -27,4 +27,6 @@ def test_wp_corpus_is_not_classified_as_webshell():
         result = deobfuscate(path.read_text(encoding="utf-8"), language="php", path=str(path))
         roles = {role.name for role in result.classification.roles}
         assert "webshell" not in roles
+        assert "stealer" not in roles
+        assert "dropper" not in roles
         assert not any(item.kind == "code-sequence" for item in result.surface.items)
