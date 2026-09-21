@@ -103,7 +103,7 @@ def _main(argv: list[str] | None = None) -> int:
         default="auto",
         help="Language (default: auto-detect from path and contents)",
     )
-    parser.add_argument("--max-passes", type=int, default=8, help="Maximum unwrap/fold iterations (default: 8)")
+    parser.add_argument("--max-passes", type=int, default=16, help="Maximum unwrap/fold iterations (default: 16)")
     parser.add_argument(
         "--sandbox",
         choices=("dump", "observe"),

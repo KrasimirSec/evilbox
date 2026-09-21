@@ -14,6 +14,7 @@ from evilbox.php.passes import transform_php
 from evilbox.php.pretty import pretty_php
 from evilbox.rewrite import has_error
 from evilbox.signature import SurfaceSignatures, extract_surface
+from evilbox.unwrap import unwrap_source
 
 
 @dataclass
@@ -58,7 +59,7 @@ def deobfuscate(
     *,
     language: str = "auto",
     path: str | None = None,
-    max_passes: int = 8,
+    max_passes: int = 16,
     surface_text: str | None = None,
 ) -> Result:
     lang = detect_language(source, path=path, lang=language)
@@ -72,8 +73,11 @@ def deobfuscate(
         layers.append(_layer("eval-dump", "eval-dump", source))
 
     for index in range(max(1, max_passes)):
-        nxt, pass_warnings = transform(text)
+        nxt, unwrap_warnings = unwrap_source(text, lang)
+        warnings.extend(unwrap_warnings)
+        transformed, pass_warnings = transform(nxt)
         warnings.extend(pass_warnings)
+        nxt = transformed
         if nxt == text:
             break
         tree = parse(nxt)
