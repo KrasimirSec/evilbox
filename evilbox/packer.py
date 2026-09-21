@@ -60,7 +60,9 @@ _HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("yakpro-po", re.compile(r"yakpro|YAK Pro", re.I)),
     ("myobfuscate", re.compile(r"myobfuscate\.com", re.I)),
     ("buffer-from-hex", re.compile(r"Buffer\s*\.\s*from\s*\([^;]{0,80}['\"]hex['\"]", re.I)),
-    ("huge-whitespace", re.compile(r"\n{15,}|[^\S\n]{200,}")),
+    ("ioncube-encoded", re.compile(r"ionCube\s+Loader|ioncube_loader", re.I)),
+    ("zend-guard-encoded", re.compile(r"Zend\s+Guard|@Zend;", re.I)),
+    ("sourceguardian-encoded", re.compile(r"sourceguardian|sg_load\s*\(", re.I)),
 )
 
 

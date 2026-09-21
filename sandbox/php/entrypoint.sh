@@ -34,7 +34,8 @@ SAMPLE="${1:-/samples/sample.php}"
 TIMEOUT="${SANDBOX_TIMEOUT:-15}"
 echo "mode=${SANDBOX_MODE:-dump} timeout=${TIMEOUT}s sample=${SAMPLE}" >>"$LOGS/setup.log"
 
-timeout --kill-after=3s "${TIMEOUT}s" php "$SAMPLE" \
+timeout --kill-after=3s "${TIMEOUT}s" \
+  env LD_PRELOAD=/opt/sandbox/nosleep.so php "$SAMPLE" \
   >"$LOGS/php.stdout.log" 2>"$LOGS/php.stderr.log" || true
 
 python3 /opt/sandbox/collect_domains.py || true

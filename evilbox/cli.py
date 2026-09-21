@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from evilbox.classify import cluster_groups
 from evilbox.detect import PHP_EXTS, JS_EXTS, detect_language
 from evilbox.extract import extract_indicators, format_indicators
 from evilbox.interactive import run_interactive
@@ -105,6 +106,17 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-passes", type=int, default=16, help="Maximum unwrap/fold iterations (default: 16)")
     parser.add_argument(
+        "--php-version",
+        default="8.3",
+        help="PHP language version for folds and sandbox image (5.6, 7.4, 8.3; default: 8.3)",
+    )
+    parser.add_argument(
+        "--sandbox-profile",
+        choices=("default", "googlebot", "google-referrer", "wp-cookie"),
+        default="default",
+        help="Sandbox request profile (User-Agent / referrer / WordPress cookies)",
+    )
+    parser.add_argument(
         "--sandbox",
         choices=("dump", "observe"),
         help="Run the sample in an isolated Docker lab. PHP uses evalhook. JavaScript is deobfuscated statically (no PHP sandbox).",
@@ -157,7 +169,9 @@ def _main(argv: list[str] | None = None) -> int:
             return _emit(args, result, path)
         return _run_sandbox(args, source, path)
 
-    result = deobfuscate(source, language=lang, path=path, max_passes=args.max_passes)
+    result = deobfuscate(
+        source, language=lang, path=path, max_passes=args.max_passes, php_version=args.php_version
+    )
     return _emit(args, result, path)
 
 
@@ -178,7 +192,7 @@ def _run_batch(args) -> int:
         except OSError as exc:
             raise CliError(_os_message(exc, str(html_dir))) from exc
     status = 0
-    clusters: dict[str, list[str]] = {}
+    cluster_samples: list[tuple[str, str]] = []
     for sample in files:
         try:
             source = _read_text(sample)
@@ -186,8 +200,14 @@ def _run_batch(args) -> int:
             print(f"error: {exc}", file=sys.stderr)
             status = 2
             continue
-        result = deobfuscate(source, language=args.lang, path=str(sample), max_passes=args.max_passes)
-        clusters.setdefault(result.cluster_sha256, []).append(str(sample))
+        result = deobfuscate(
+            source,
+            language=args.lang,
+            path=str(sample),
+            max_passes=args.max_passes,
+            php_version=getattr(args, "php_version", "8.3"),
+        )
+        cluster_samples.append((str(sample), result.text))
         dest = out_dir / (sample.stem + ".clean" + sample.suffix)
         report_path = out_dir / (sample.stem + ".report.json")
         html_path = (html_dir / (sample.stem + ".report.html")) if html_dir else None
@@ -200,6 +220,7 @@ def _run_batch(args) -> int:
         if code:
             status = code
         print(f"{sample.name}: {', '.join(r.name for r in result.classification.roles) or 'unclassified'}", file=sys.stderr)
+    clusters = cluster_groups(cluster_samples)
     _write_text(out_dir / "clusters.json", json.dumps(clusters, indent=2) + "\n")
     return status
 
@@ -219,7 +240,14 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
         sample = Path(path)
 
     try:
-        result = run_php_sandbox(sample, mode=args.sandbox, logs_root=logs_root, timeout=args.timeout)
+        result = run_php_sandbox(
+            sample,
+            mode=args.sandbox,
+            logs_root=logs_root,
+            timeout=args.timeout,
+            php_version=getattr(args, "php_version", "8.3"),
+            profile=getattr(args, "sandbox_profile", "default"),
+        )
     except SandboxError as exc:
         raise CliError(str(exc)) from exc
     finally:
@@ -236,6 +264,9 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
         "http": result.http,
         "eval_dumps": [p.name for p in result.eval_dumps],
         "docker_status": result.docker_status,
+        "php_version": getattr(args, "php_version", "8.3"),
+        "profile": getattr(args, "sandbox_profile", "default"),
+        "cross_check": getattr(analysis, "sandbox_cross_check", None) if analysis is not None else None,
     }
     _write_text(result.log_dir / "indicators.json", json.dumps(iocs.to_dict(), indent=2) + "\n")
     if result.eval_dumps:
@@ -270,6 +301,9 @@ def _emit(args, result, path: str | None, sandbox=None, stdout_code: bool = True
         _write_text(Path(output), result.text)
     if not result.parse_ok:
         print("error: parse failed after deobfuscation", file=sys.stderr)
+        return 1
+    if getattr(result, "failed_folds", False):
+        print("error: unresolved decoder folds remain", file=sys.stderr)
         return 1
     return 0
 

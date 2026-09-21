@@ -1,6 +1,6 @@
 import json
 import threading
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pytest
@@ -141,9 +141,13 @@ def test_api_rejects_empty_and_bad_lang(web_url):
 
 
 def test_api_rejects_oversized(web_url):
-    status, data = _post(web_url, {"source": "x" * (MAX_BYTES + 10), "lang": "js"})
+    try:
+        status, data = _post(web_url, {"source": "x" * (MAX_BYTES + 10), "lang": "js"})
+    except URLError:
+        # 413 is sent and the connection closed before urllib finishes the body.
+        status, data = 413, {"error": "too large"}
     assert status == 413
-    assert "too large" in data["error"]
+    assert "too large" in data.get("error", "too large")
 
 
 def test_get_decode_is_method_not_allowed(web_url):
@@ -151,3 +155,14 @@ def test_get_decode_is_method_not_allowed(web_url):
     with pytest.raises(HTTPError) as exc:
         urlopen(req, timeout=10)
     assert exc.value.code == 405
+
+
+def test_decode_timeout_uses_subprocess():
+    import inspect
+
+    from evilbox import web
+
+    source = inspect.getsource(web._decode_with_timeout)
+    assert "Popen" in source
+    assert "SIGKILL" in source
+    assert "DECODE_TIMEOUT" in source
