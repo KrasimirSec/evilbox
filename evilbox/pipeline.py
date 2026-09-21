@@ -74,6 +74,7 @@ def deobfuscate(
     max_passes: int = 16,
     surface_text: str | None = None,
     php_version: str = "8.3",
+    extra_layers: list[tuple[str, str]] | None = None,
 ) -> Result:
     lang = detect_language(source, path=path, lang=language)
     warnings: list[str] = []
@@ -83,6 +84,10 @@ def deobfuscate(
     text = source
     if surface_text is not None and source != original:
         layers.append(_layer("eval-dump", "eval-dump", source, language=lang))
+    if extra_layers:
+        for extra_name, extra_text in extra_layers:
+            if extra_text and extra_text != source and extra_text != original:
+                layers.append(_layer(extra_name, "eval-dump", extra_text, language=lang))
 
     encoders = detect_commercial_encoders(original)
     if encoders:
@@ -142,9 +147,9 @@ def deobfuscate(
     if encoders:
         failed_folds = True
 
-    indicators = extract_indicators(text, original)
+    indicators = extract_indicators(*(layer.text for layer in layers))
     layer_pairs = [(layer.name, layer.text) for layer in layers]
-    classification = classify_layers(layer_pairs)
+    classification = classify_layers(layer_pairs, language=lang)
     surface = extract_surface(original, language=lang)
     packer = packer_hints(original)
     for hit in encoders:

@@ -40,6 +40,8 @@ def parse_js(source: str):
 
 
 def parse_php(source: str):
+    from evilbox.rewrite import source_encoding
+
     lang = php_language() if "<?" in source[:200] or source.lstrip().startswith("<?") else php_only_language()
     parser = make_parser(lang)
-    return parser.parse(source.encode("utf-8"))
+    return parser.parse(source.encode(source_encoding(source)))

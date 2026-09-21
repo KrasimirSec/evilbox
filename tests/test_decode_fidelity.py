@@ -7,9 +7,12 @@ import pytest
 
 from evilbox.decode import (
     MAX_CODEC_OUTPUT,
+    expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_str_pad,
     php_string_bytes,
+    php_strtoupper,
     php_substr,
     raw_inflate,
     stripslashes,
@@ -96,6 +99,10 @@ def test_php_differential_property_folds():
             php_val = php_eval_json(f"substr({args})")
             ours = php_substr(sample, start, length, php_version=version)
             assert php_val == ours
+
+    assert php_strtoupper("abc\xff") == "ABC\xff"
+    assert expand_php_charlist("a..c") == "abc"
+    assert php_str_pad("x", 5, "ab", 1) == "xabab"
 
     chars = [chr(n) for n in range(32, 127) if chr(n) not in "'\\"]
     for _ in range(16):

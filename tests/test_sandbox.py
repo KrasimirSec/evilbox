@@ -16,6 +16,13 @@ def test_sandbox_dockerfile_present():
     assert "vendor/php-eval-hook" in text
     assert "@sha256:" in text
     assert (context / "vendor" / "php-eval-hook" / "evalhook.c").is_file()
+    assert (context / "tcp_logger.py").is_file()
+    entry = (context / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "ip route add local 0.0.0.0/0" in entry
+    assert "setpriv" in entry
+    prepend = (context / "prepend.php").read_text(encoding="utf-8")
+    assert "getenv('SANDBOX_LOGS')" not in prepend
+    assert "getenv('SANDBOX_MODE')" not in prepend
     commit = (context / "vendor" / "php-eval-hook.COMMIT").read_text(encoding="utf-8").splitlines()[-1].strip()
     assert commit == "25e4e2a9b84b4f4c45f3d2dfa35121ed7938b889"
 
@@ -35,7 +42,8 @@ def test_docker_run_is_isolated(tmp_path):
     )
     assert "--network" in args
     assert args[args.index("--network") + 1] == "none"
-    assert "--rm" in args
+    assert "--rm" not in args
+    assert "--read-only" in args
     assert "--cap-drop" in args
     assert args[args.index("--cap-drop") + 1] == "ALL"
     assert "--pids-limit" in args
@@ -43,8 +51,12 @@ def test_docker_run_is_isolated(tmp_path):
     joined = " ".join(args)
     assert "readonly=true" in joined
     assert "SANDBOX_MODE=observe" in joined
+    assert "SANDBOX_LOGS=" not in joined
+    assert "dst=/logs" not in joined
+    assert "type=tmpfs,destination=/logs" in joined
     assert "no-new-privileges" in joined
     assert "seccomp=unconfined" not in joined
+    assert "NET_ADMIN" in joined
 
 
 def test_finalize_logs_collects_domains(tmp_path):
@@ -60,3 +72,15 @@ def test_finalize_logs_collects_domains(tmp_path):
     assert dumps[0].name == "eval-0001.php"
     summary = (tmp_path / "summary.json").read_text(encoding="utf-8")
     assert "evil.example" in summary
+
+
+def test_finalize_logs_rejects_symlinks(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("secret", encoding="utf-8")
+    link = tmp_path / "domains.txt"
+    link.symlink_to(victim)
+    (tmp_path / "eval-0001.php").write_text("echo 1;", encoding="utf-8")
+    domains, dumps = finalize_logs(tmp_path)
+    assert dumps[0].name == "eval-0001.php"
+    assert not link.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "secret"

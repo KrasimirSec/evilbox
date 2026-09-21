@@ -184,7 +184,11 @@ class SinkHandler(BaseHTTPRequestHandler):
                 f"http{'s' if record['scheme']=='https' else ''}://{host}{self.path}\n"
             )
         _log_domain(host.split("@")[-1] if host else "")
-        payload = b"OK\n"
+        stage = Path("/opt/sandbox/stage.bin")
+        if stage.is_file():
+            payload = stage.read_bytes()[:65536]
+        else:
+            payload = b"OK\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
