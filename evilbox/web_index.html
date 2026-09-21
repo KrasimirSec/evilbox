@@ -449,6 +449,52 @@
         box.appendChild(table);
       }
 
+      section("ATT&CK");
+      const attack = (report.correlation || {}).attack || [];
+      if (!attack.length) {
+        const p = document.createElement("p");
+        p.className = "ev";
+        p.textContent = "none";
+        box.appendChild(p);
+      } else {
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        ["id", "name", "from"].forEach((col) => {
+          const th = document.createElement("th");
+          th.textContent = col;
+          head.appendChild(th);
+        });
+        table.appendChild(head);
+        attack.forEach((row) => {
+          const tr = document.createElement("tr");
+          [row.id, row.name, row.from].forEach((val) => {
+            const td = document.createElement("td");
+            td.textContent = val || "";
+            tr.appendChild(td);
+          });
+          table.appendChild(tr);
+        });
+        box.appendChild(table);
+      }
+
+      section("Campaign keys");
+      const keys = (report.correlation || {}).campaign_keys || [];
+      if (!keys.length) {
+        const p = document.createElement("p");
+        p.className = "ev";
+        p.textContent = "none";
+        box.appendChild(p);
+      } else {
+        keys.slice(0, 80).forEach((key) => {
+          const e = document.createElement("div");
+          e.className = "ev";
+          const code = document.createElement("code");
+          code.textContent = key;
+          e.appendChild(code);
+          box.appendChild(e);
+        });
+      }
+
       section("Surface signatures (original layer)");
       const items = (report.surface_signatures || {}).items || [];
       if (!items.length) {

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from evilbox.classify import cluster_groups
 from evilbox.detect import PHP_EXTS, JS_EXTS, detect_language
-from evilbox.extract import extract_indicators, format_indicators
+from evilbox.extract import format_indicators, ingest_sandbox, locate_indicators
 from evilbox.interactive import run_interactive
 from evilbox.pipeline import deobfuscate
 from evilbox.report import build_report, dump_json, format_analysis, render_html
@@ -301,12 +301,18 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
 
     print(f"sandbox logs: {result.log_dir}", file=sys.stderr)
     analysis = result.analysis
-    iocs = extract_indicators(result.deobfuscated, extra_domains=result.domains)
+    iocs = ingest_sandbox(
+        analysis.indicators if analysis is not None else None,
+        extra_domains=result.domains,
+        http=result.http,
+        tcp=getattr(result, "tcp", None),
+    )
     sandbox_meta = {
         "log_dir": str(result.log_dir),
         "mode": args.sandbox,
         "domains": result.domains,
         "http": result.http,
+        "tcp": getattr(result, "tcp", None),
         "eval_dumps": [p.name for p in result.eval_dumps],
         "docker_status": result.docker_status,
         "php_version": getattr(args, "php_version", "8.3"),
@@ -319,6 +325,21 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
     if analysis is None:
         return _write_output(args.output, result.deobfuscated)
     analysis.indicators = iocs
+    sandbox_rows = locate_indicators(
+        [("sandbox", result.deobfuscated)],
+        extra_domains=result.domains,
+        http=result.http,
+        tcp=getattr(result, "tcp", None),
+    )
+    existing = list(analysis.indicators_by_layer or [])
+    seen = {(row["kind"], row["value"].lower(), row["layer"]) for row in existing}
+    for row in sandbox_rows:
+        key = (row["kind"], row["value"].lower(), row["layer"])
+        if key in seen:
+            continue
+        existing.append(row)
+        seen.add(key)
+    analysis.indicators_by_layer = existing
     return _emit(args, analysis, str(sample), sandbox=sandbox_meta)
 
 

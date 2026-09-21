@@ -4,6 +4,8 @@ import html
 import json
 from typing import Any
 
+from evilbox.correlate import build_correlation
+
 
 def build_report(
     *,
@@ -11,17 +13,20 @@ def build_report(
     path: str | None,
     sandbox: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    sample = {
+        "path": path,
+        "language": result.language,
+        "sha256": result.original_sha256,
+        "inner_sha256": result.inner_sha256,
+        "cluster_sha256": result.cluster_sha256,
+        "cluster_minhash": getattr(result, "cluster_minhash", ""),
+        "php_version": getattr(result, "php_version", None),
+    }
+    roles = [r.to_dict() for r in result.classification.roles]
+    capabilities = [c.to_dict() for c in result.classification.capabilities]
     report: dict[str, Any] = {
         "schema": "evilbox.report.v1",
-        "sample": {
-            "path": path,
-            "language": result.language,
-            "sha256": result.original_sha256,
-            "inner_sha256": result.inner_sha256,
-            "cluster_sha256": result.cluster_sha256,
-            "cluster_minhash": getattr(result, "cluster_minhash", ""),
-            "php_version": getattr(result, "php_version", None),
-        },
+        "sample": sample,
         "packer": result.packer,
         "parse_ok": result.parse_ok,
         "failed_folds": getattr(result, "failed_folds", False),
@@ -29,10 +34,16 @@ def build_report(
         "layers": [layer.to_dict() for layer in result.layers],
         "unresolved_folds": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(result, "unresolved_folds", [])],
         "encoded_not_analyzable": getattr(result, "encoded_not_analyzable", []),
-        "roles": [r.to_dict() for r in result.classification.roles],
-        "capabilities": [c.to_dict() for c in result.classification.capabilities],
+        "roles": roles,
+        "capabilities": capabilities,
         "indicators": result.indicators.to_dict(),
         "indicators_by_layer": result.indicators_by_layer,
+        "correlation": build_correlation(
+            indicators=result.indicators,
+            capabilities=capabilities,
+            roles=roles,
+            sample=sample,
+        ),
         "surface_signatures": result.surface.to_dict(),
         "sandbox": sandbox,
         "sandbox_cross_check": (sandbox or {}).get("cross_check") if sandbox else getattr(result, "sandbox_cross_check", None),
@@ -86,6 +97,17 @@ def format_analysis(report: dict[str, Any]) -> str:
         for item in surface[:12]:
             lines.append(f"  [{item['kind']}] {item['yara'][:80]}")
             lines.append(f"    why: {item['why']}")
+    correlation = report.get("correlation") or {}
+    attack = correlation.get("attack") or []
+    if attack:
+        lines.append("ATT&CK: " + ", ".join(f"{row['id']} ({row['name']})" for row in attack))
+    keys = correlation.get("campaign_keys") or []
+    if keys:
+        lines.append("campaign keys:")
+        for key in keys[:24]:
+            lines.append(f"  {key}")
+        if len(keys) > 24:
+            lines.append(f"  … {len(keys) - 24} more")
     return "\n".join(lines) + "\n"
 
 
@@ -105,6 +127,14 @@ def render_html(report: dict[str, Any]) -> str:
         f"<tr><td>{esc(row['layer'])}</td><td>{esc(row['kind'])}</td><td><code>{esc(row['value'])}</code></td></tr>"
         for row in report.get("indicators_by_layer") or []
     )
+    correlation = report.get("correlation") or {}
+    attack_rows = "".join(
+        f"<tr><td><code>{esc(row.get('id'))}</code></td><td>{esc(row.get('name'))}</td><td>{esc(row.get('from'))}</td></tr>"
+        for row in correlation.get("attack") or []
+    ) or "<tr><td colspan='3'>none</td></tr>"
+    campaign_keys = "".join(
+        f"<li><code>{esc(key)}</code></li>" for key in (correlation.get("campaign_keys") or [])[:80]
+    ) or "<li>none</li>"
     folds = "".join(
         f"<tr><td>{esc(item.get('layer'))}</td><td>{esc(item.get('kind'))}</td>"
         f"<td><code>{esc(item.get('callee'))}</code></td><td>{esc(item.get('reason'))}</td>"
@@ -148,6 +178,10 @@ sandbox cross-check: {cross_html}</p>
 <h2>YARA rule</h2><pre>{yara}</pre>
 <h2>Indicators by layer</h2>
 <table><tr><th>layer</th><th>kind</th><th>value</th></tr>{iocs}</table>
+<h2>ATT&amp;CK</h2>
+<table><tr><th>id</th><th>name</th><th>from</th></tr>{attack_rows}</table>
+<h2>Campaign keys</h2>
+<ul>{campaign_keys}</ul>
 </body></html>
 """
 

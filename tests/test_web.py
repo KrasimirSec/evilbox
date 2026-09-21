@@ -61,6 +61,8 @@ def test_index_page(web_url):
     text = body.decode("utf-8")
     assert "EVILBOX" in text
     assert "/api/decode" in text
+    assert "Campaign keys" in text
+    assert "ATT&CK" in text
     assert "text/html" in headers.get("Content-Type", "")
 
 

@@ -278,6 +278,9 @@ def collect_http(log_dir: Path) -> list[dict]:
                 "host": rec.get("host"),
                 "path": rec.get("path") or rec.get("url"),
                 "method": rec.get("method"),
+                "scheme": rec.get("scheme"),
+                "headers": rec.get("headers") or {},
+                "body": rec.get("body") or "",
             }
         )
     return rows
