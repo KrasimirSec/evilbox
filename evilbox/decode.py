@@ -303,14 +303,26 @@ def uudecode(text: str) -> bytes | None:
     return None if result is None else result.data
 
 
+def _uu_line_short(line: str) -> bool:
+    """True when the length byte claims more payload than the line encodes."""
+    body = line.replace("\r", "").replace("\n", "")
+    if not body:
+        return False
+    nbytes = (ord(body[0]) - 32) & 63
+    encoded_needed = ((nbytes + 2) // 3) * 4
+    return len(body) < 1 + encoded_needed
+
+
 def uudecode_ex(text: str) -> UudecodeResult | None:
-    """PHP convert_uudecode. Padding retries are marked recovered, not clean."""
+    """PHP convert_uudecode. Short/padded lines are marked recovered, not clean."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out = bytearray()
     recovered = False
     for line in lines:
         if not line or line.startswith("begin ") or line.strip() == "end":
             continue
+        if _uu_line_short(line):
+            recovered = True
         try:
             out.extend(binascii.a2b_uu(line))
             continue

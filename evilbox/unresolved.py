@@ -66,7 +66,7 @@ JS_DECODERS = frozenset(
 )
 
 REMOTE_RE = re.compile(
-    r"https?://[^\s\"']+(?:pastebin|githubusercontent|discord\.com/api|api\.telegram|"
+    r"https?://[^\s\"']*(?:pastebin\.|githubusercontent|discord\.com/api|api\.telegram|"
     r"dns-query|etherscan|infura\.io|cdn\.jsdelivr|unpkg\.com|gist\.github)[^\s\"']*",
     re.I,
 )

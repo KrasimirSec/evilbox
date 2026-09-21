@@ -56,12 +56,11 @@ def test_uudecode_padding_is_recovered():
     assert clean is not None
     assert clean.data == payload
     assert clean.recovered is False
-    truncated = encoded.rstrip(" \n")
-    if truncated == encoded.strip():
-        truncated = encoded.strip()[:-2]
+    truncated = encoded.split("\n")[0][:8]
     recovered = uudecode_ex(truncated)
-    if recovered is not None:
-        assert recovered.recovered is True
+    assert recovered is not None
+    assert recovered.recovered is True
+    assert recovered.data != payload
 
 
 def test_inflate_output_is_capped():
