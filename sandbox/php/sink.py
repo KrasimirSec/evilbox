@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fake HTTP/HTTPS sink: 200 OK, SNI certs from the sandbox CA, JSONL request log."""
+"""Fake HTTP/HTTPS sink: 200 OK, SNI certs from the sandbox CA, JSONL request log.
+
+Certificates are minted with the OpenSSL CLI so the image does not need
+python3-cryptography (or a network fetch of that wheel).
+"""
 
 from __future__ import annotations
 
@@ -7,26 +11,40 @@ import argparse
 import datetime as dt
 import ipaddress
 import json
+import shutil
 import ssl
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-
 LOGS = Path("/logs")
 CA_DIR = Path("/tmp/ca")
 _cert_cache: dict[str, ssl.SSLContext] = {}
-_ca_cert = None
-_ca_key = None
 _lock = threading.Lock()
 
 
 def _now() -> str:
     return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _openssl() -> str:
+    path = shutil.which("openssl")
+    if not path:
+        raise RuntimeError("openssl is not installed in the sandbox image")
+    return path
+
+
+def _run_openssl(args: list[str]) -> None:
+    proc = subprocess.run(
+        [_openssl(), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "openssl failed").strip()
+        raise RuntimeError(detail)
 
 
 def init_ca(ca_dir: Path) -> None:
@@ -35,61 +53,37 @@ def init_ca(ca_dir: Path) -> None:
     crt_path = ca_dir / "ca.crt"
     if key_path.exists() and crt_path.exists():
         return
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name(
+    _run_openssl(
         [
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Evilbox Sandbox"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "Evilbox Sandbox CA"),
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-sha256",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(crt_path),
+            "-days",
+            "3650",
+            "-subj",
+            "/C=US/O=Evilbox Sandbox/CN=Evilbox Sandbox CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
         ]
     )
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(dt.datetime.utcnow() - dt.timedelta(days=1))
-        .not_valid_after(dt.datetime.utcnow() + dt.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=False,
-                key_encipherment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=True,
-                crl_sign=True,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .sign(key, hashes.SHA256())
-    )
-    key_path.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
-    crt_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def _load_ca(ca_dir: Path):
-    global _ca_cert, _ca_key
-    _ca_key = serialization.load_pem_private_key((ca_dir / "ca.key").read_bytes(), password=None)
-    _ca_cert = x509.load_pem_x509_certificate((ca_dir / "ca.crt").read_bytes())
-
-
-def _subject_alt_name(hostname: str) -> x509.SubjectAlternativeName:
+def _san_for_host(hostname: str) -> str:
     host = hostname.strip() or "localhost"
     try:
-        return x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address(host))])
+        ipaddress.ip_address(host)
+        return f"IP:{host}"
     except ValueError:
-        return x509.SubjectAlternativeName([x509.DNSName(host)])
+        return f"DNS:{host}"
 
 
 def _leaf_for_host(hostname: str) -> ssl.SSLContext:
@@ -97,41 +91,55 @@ def _leaf_for_host(hostname: str) -> ssl.SSLContext:
     with _lock:
         if host in _cert_cache:
             return _cert_cache[host]
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = x509.Name(
+        safe = host.replace("/", "_")
+        key_file = CA_DIR / f"leaf-{safe}.key"
+        crt_file = CA_DIR / f"leaf-{safe}.crt"
+        csr_file = CA_DIR / f"leaf-{safe}.csr"
+        ext_file = CA_DIR / f"leaf-{safe}.ext"
+        ext_file.write_text(
+            "basicConstraints=CA:FALSE\n"
+            "extendedKeyUsage=serverAuth\n"
+            f"subjectAltName={_san_for_host(host)}\n",
+            encoding="utf-8",
+        )
+        _run_openssl(
             [
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Evilbox Sink"),
-                x509.NameAttribute(NameOID.COMMON_NAME, host),
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                str(key_file),
+                "-out",
+                str(csr_file),
+                "-subj",
+                f"/O=Evilbox Sink/CN={host}",
             ]
         )
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(_ca_cert.subject)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(dt.datetime.utcnow() - dt.timedelta(days=1))
-            .not_valid_after(dt.datetime.utcnow() + dt.timedelta(days=365))
-            .add_extension(_subject_alt_name(host), critical=False)
-            .add_extension(
-                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
-                critical=False,
-            )
-            .sign(_ca_key, hashes.SHA256())
+        _run_openssl(
+            [
+                "x509",
+                "-req",
+                "-in",
+                str(csr_file),
+                "-CA",
+                str(CA_DIR / "ca.crt"),
+                "-CAkey",
+                str(CA_DIR / "ca.key"),
+                "-CAcreateserial",
+                "-out",
+                str(crt_file),
+                "-days",
+                "365",
+                "-sha256",
+                "-extfile",
+                str(ext_file),
+            ]
         )
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        cert_file = CA_DIR / f"leaf-{host.replace('/', '_')}.pem"
-        key_file = CA_DIR / f"leaf-{host.replace('/', '_')}.key"
-        cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-        key_file.write_bytes(
-            key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-        ctx.load_cert_chain(str(cert_file), str(key_file))
+        ctx.load_cert_chain(str(crt_file), str(key_file))
         _cert_cache[host] = ctx
         return ctx
 
@@ -223,7 +231,6 @@ class HTTPSHandler(SinkHandler):
 
 
 def serve(ca_dir: Path) -> None:
-    _load_ca(ca_dir)
     httpd = ThreadingHTTPServer(("0.0.0.0", 80), SinkHandler)
     httpsd = ThreadingHTTPServer(("0.0.0.0", 443), HTTPSHandler)
     ctx = _leaf_for_host("localhost")
@@ -234,16 +241,17 @@ def serve(ca_dir: Path) -> None:
 
 
 def main() -> int:
+    global CA_DIR
     parser = argparse.ArgumentParser()
     parser.add_argument("--init-ca", action="store_true")
-    parser.add_argument("--ca-dir", default=str(CA_DIR))
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--ca-dir", default=str(CA_DIR))
     args = parser.parse_args()
-    ca_dir = Path(args.ca_dir)
+    CA_DIR = Path(args.ca_dir)
     if args.init_ca or args.serve:
-        init_ca(ca_dir)
+        init_ca(CA_DIR)
     if args.serve:
-        serve(ca_dir)
+        serve(CA_DIR)
     return 0
 
 

@@ -16,13 +16,6 @@ static zend_op_array* evalhook_compile_string(
 		zend_string *source_string,
 		const char *filename,
 		zend_compile_position pos)
-#else
-static zend_op_array* (*old_compile_string)(zend_string *, const char *);
-
-static zend_op_array* evalhook_compile_string(
-		zend_string *source_string,
-		const char *filename)
-#endif
 {
 	zend_op_array *op_array = NULL;
 	int op_compiled = 0;
@@ -40,11 +33,7 @@ static zend_op_array* evalhook_compile_string(
 			if(call_user_function(CG(function_table), NULL, &function, &retval, 2, parameter) == SUCCESS) {
 				switch(Z_TYPE(retval)) {
 					case IS_STRING:
-#if PHP_VERSION_ID >= 80000
 						op_array = old_compile_string(Z_STR(retval), filename, pos);
-#else
-						op_array = old_compile_string(Z_STR(retval), filename);
-#endif
 					case IS_FALSE:
 						op_compiled = 1;
 						break;
@@ -59,14 +48,51 @@ static zend_op_array* evalhook_compile_string(
 
 	if(op_compiled) {
 		return op_array;
-	} else {
-#if PHP_VERSION_ID >= 80000
-		return old_compile_string(source_string, filename, pos);
-#else
-		return old_compile_string(source_string, filename);
-#endif
 	}
+	return old_compile_string(source_string, filename, pos);
 }
+#else
+/* PHP 7.x still compiles eval() through zend_compile_string(zval *, char *). */
+static zend_op_array* (*old_compile_string)(zval *, char *);
+
+static zend_op_array* evalhook_compile_string(zval *source_string, char *filename)
+{
+	zend_op_array *op_array = NULL;
+	int op_compiled = 0;
+
+	if(filename && strstr(filename, "eval()'d code")) {
+		if(zend_hash_str_exists(CG(function_table), EVAL_CALLBACK_FUNCTION, strlen(EVAL_CALLBACK_FUNCTION))) {
+			zval function;
+			zval retval;
+			zval parameter[2];
+
+			ZVAL_COPY(&parameter[0], source_string);
+			ZVAL_STRING(&function, EVAL_CALLBACK_FUNCTION);
+			ZVAL_STRING(&parameter[1], filename);
+
+			if(call_user_function(CG(function_table), NULL, &function, &retval, 2, parameter) == SUCCESS) {
+				switch(Z_TYPE(retval)) {
+					case IS_STRING:
+						op_array = old_compile_string(&retval, filename);
+					case IS_FALSE:
+						op_compiled = 1;
+						break;
+				}
+			}
+
+			zval_dtor(&function);
+			zval_dtor(&retval);
+			zval_dtor(&parameter[0]);
+			zval_dtor(&parameter[1]);
+		}
+	}
+
+	if(op_compiled) {
+		return op_array;
+	}
+	return old_compile_string(source_string, filename);
+}
+#endif
 
 /* Evasion protection
  * ==================

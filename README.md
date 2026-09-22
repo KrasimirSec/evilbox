@@ -43,7 +43,7 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--report PATH` | JSON report (`evilbox.report.v1`) |
 | `--html PATH` | HTML report |
 | `--max-passes N` | Unwrap/fold iterations (default: 16) |
-| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Default **8.3** (Debian bookworm, live mirrors). `7.4` still exists for string `assert` / `create_function` / `preg_replace /e`; that image is Debian 11 and cannot use live security |
+| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Default **8.3**. `7.4` still exists for string `assert` / `create_function` / `preg_replace /e`. 8.3 and 7.4 are vendored offline images; 5.6 still pulls `php:5.6-cli` |
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
 | `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape inside the sandbox |
 | `--keep-name` | Mount the sample under its original filename inside the sandbox |
@@ -198,7 +198,7 @@ Not included: running a JavaScript or PHP engine over HTTP. The optional Docker 
 
 ## PHP sandbox (evalhook, no real internet)
 
-Optional Docker lab for packed PHP. Requires a **running Docker daemon** on **Linux or macOS** (Docker Desktop / Colima / OrbStack). Images are multi-arch (`linux/amd64` and `linux/arm64`); Apple Silicon does not need qemu. The first run **builds** `evilbox-php-sandbox:<php>-<hash>` (pulls the PHP base image, compiles evalhook). That often takes several minutes; Evilbox prints `evilbox: …` status lines and streams `docker build --progress=plain` to stderr so it does not look hung. Later runs **reuse that image** and only start a container. The sample is never baked into the image.
+Optional Docker lab for packed PHP. Requires a **running Docker daemon** on **Linux or macOS** (Docker Desktop / Colima / OrbStack). Images are multi-arch (`linux/amd64` and `linux/arm64`); Apple Silicon does not need qemu. The first run **builds** `evilbox-php-sandbox:<php>-<hash>` from **vendored** PHP 8.3 / 7.4 rootfs tarballs and evalhook (`docker build --network=none`). Nothing is pulled from Docker Hub or apt. Evilbox prints `evilbox: …` status lines and streams `docker build --progress=plain` to stderr. Later runs **reuse that image** and only start a container. The sample is never baked into the image.
 
 On macOS and snap Docker, the sample is copied under `~/.cache/evilbox/docker-mounts/` before bind-mounting (those engines do not share `/tmp` by default). `--memory-swap` is omitted on macOS because Docker Desktop’s VM often rejects it.
 
@@ -206,7 +206,7 @@ Each run **starts a new container with `--network none`, `--read-only`, `--cap-d
 
 If Docker is missing or the daemon is down, the CLI fails immediately and tells you to omit `--sandbox` for static decode.
 
-`--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. **Observe defaults to 8.3** (bookworm still has working `deb.debian.org` packages on amd64 and arm64). Pass `--php-version 7.4` only if you need string `assert`, `create_function`, or `preg_replace /e`. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
+`--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. **Observe defaults to 8.3**. Pass `--php-version 7.4` only if you need string `assert`, `create_function`, or `preg_replace /e`. 8.3 and 7.4 ship vendored evalhook; 5.6 cannot (no `zend_string`) and still needs a registry pull.
 
 `--sandbox-profile` sets the request the sample sees: `googlebot` (Googlebot UA), `google-referrer`, or `wp-cookie` (WordPress login cookies). WordPress function stubs are prepended. `sleep` / `usleep` / `nanosleep` are hooked to return immediately (LD_PRELOAD, PHP process only). `--keep-name` preserves the sample basename inside `/samples`. `--stage-file` is served by the sink instead of `OK`.
 
@@ -236,9 +236,9 @@ Requires Docker. The sample never gets a route to the public internet (`--networ
 
 ### Supply chain (sandbox image)
 
-- **evalhook** is **vendored** at a pinned commit under [`sandbox/php/vendor/php-eval-hook/`](sandbox/php/vendor/php-eval-hook/). The image **does not** `git clone` at build time. See [`sandbox/php/vendor/SOURCES.md`](sandbox/php/vendor/SOURCES.md) for the GitHub URL, commit, and archive SHA-256.
-- **PHP** is not stored in git. The Dockerfile uses `php:8.3-cli-bookworm@sha256:…` so the tag cannot drift. Docker still **pulls that digest once** if you do not already have it.
-- Extra Debian packages (`dnsmasq`, `python3-cryptography`, …) are installed from apt on the first uncached build. PHP 7.4 uses `archive.debian.org` **bullseye main only** (live security 404s, and archive has no bullseye-security suite).
+- **evalhook** is **vendored** at a pinned commit under [`sandbox/php/vendor/php-eval-hook/`](sandbox/php/vendor/php-eval-hook/) and precompiled into the rootfs tarballs. The image **does not** `git clone` at build time. See [`sandbox/php/vendor/SOURCES.md`](sandbox/php/vendor/SOURCES.md) for the GitHub URL, commit, archive SHA-256, and PHP image manifests.
+- **PHP 8.3.33 and 7.4.33** (linux/amd64 and linux/arm64) live in [`sandbox/php/vendor/rootfs/`](sandbox/php/vendor/rootfs/). `docker build --network=none` ADDs the matching tarball. Docker Hub and apk/apt are not contacted.
+- The HTTP sink mints certificates with the OpenSSL CLI (no `python3-cryptography` wheel). PHP 5.6 is not vendored and still uses `FROM php:5.6-cli`.
 
 ## Tests
 

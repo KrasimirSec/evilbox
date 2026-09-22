@@ -126,7 +126,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sandbox",
         choices=("dump", "observe"),
-        help="Run the sample in an isolated Docker lab (needs a running daemon). First run builds the PHP image and can take several minutes with live logs on stderr. JavaScript stays on the static path.",
+        help="Run the sample in an isolated Docker lab (needs a running daemon). First run unpacks vendored PHP and evalhook with no network. JavaScript stays on the static path.",
     )
     parser.add_argument(
         "--logs-dir",

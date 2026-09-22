@@ -31,19 +31,34 @@ def test_sandbox_dockerfile_present():
     assert (context / "sleep_hook.c").is_file()
     text = (context / "Dockerfile").read_text(encoding="utf-8")
     assert "git clone" not in text
-    assert "vendor/php-eval-hook" in text
-    assert "@sha256:" in text
+    assert "FROM scratch" in text
+    assert "vendor/rootfs/php-8.3.33-cli-alpine-linux-" in text
+    assert "RUN apt-get" not in text
+    assert "@sha256:" not in text
     assert (context / "debian-archive.sh").is_file()
     archive_sh = (context / "debian-archive.sh").read_text(encoding="utf-8")
     assert "archive.debian.org/debian" in archive_sh
     assert "debian-security" not in archive_sh
     dockerfile_74 = (context / "Dockerfile.7.4").read_text(encoding="utf-8")
-    assert "deb http://archive.debian.org/debian bullseye main" in dockerfile_74
-    assert "deb http://archive.debian.org/debian-security" not in dockerfile_74
-    assert "php:7.4-cli-bullseye" in dockerfile_74
+    assert "FROM scratch" in dockerfile_74
+    assert "vendor/rootfs/php-7.4.33-cli-alpine-linux-" in dockerfile_74
+    assert "RUN apt-get" not in dockerfile_74
+    assert "php:7.4-cli-bullseye" not in dockerfile_74
     dockerfile_56 = (context / "Dockerfile.5.6").read_text(encoding="utf-8")
     assert "debian-archive.sh" in dockerfile_56
     assert (context / "vendor" / "php-eval-hook" / "evalhook.c").is_file()
+    rootfs = context / "vendor" / "rootfs"
+    for name in (
+        "php-8.3.33-cli-alpine-linux-amd64.tar.gz",
+        "php-8.3.33-cli-alpine-linux-arm64.tar.gz",
+        "php-7.4.33-cli-alpine-linux-amd64.tar.gz",
+        "php-7.4.33-cli-alpine-linux-arm64.tar.gz",
+    ):
+        assert (rootfs / name).is_file(), name
+        assert (rootfs / name).stat().st_size > 1_000_000
+    sums = (context / "vendor" / "SHA256SUMS").read_text(encoding="utf-8")
+    assert "rootfs/php-8.3.33-cli-alpine-linux-amd64.tar.gz" in sums
+    assert "php-eval-hook-25e4e2a9b84b4f4c45f3d2dfa35121ed7938b889.tar.gz" in sums
     assert (context / "tcp_logger.py").is_file()
     entry = (context / "entrypoint.sh").read_text(encoding="utf-8")
     assert "ip route add local 0.0.0.0/0" in entry
@@ -220,14 +235,19 @@ def test_prepare_sandbox_image_builds_when_missing(monkeypatch):
 def test_build_image_uses_plain_progress(monkeypatch):
     seen: list[tuple[list[str], int]] = []
 
-    def fake_logged(cmd, *, timeout):
+    def fake_logged(cmd, *, timeout, env=None):
         seen.append((cmd, timeout))
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("evilbox.sandbox._run_logged", fake_logged)
-    build_image(Path("/tmp"), "evilbox-php-sandbox:x", dockerfile=Path("/tmp/Dockerfile"))
+    context = sandbox_context_dir()
+    build_image(context, "evilbox-php-sandbox:x", dockerfile=context / "Dockerfile")
     cmd, timeout = seen[0]
-    assert cmd[:4] == ["docker", "build", "--progress=plain", "-t"]
+    assert cmd[0:3] == ["docker", "build", "--progress=plain"]
+    assert "--network" in cmd
+    assert cmd[cmd.index("--network") + 1] == "none"
+    assert "--build-arg" in cmd
+    assert "TARGETARCH=" in cmd[cmd.index("--build-arg") + 1]
     assert timeout == 600
 
 

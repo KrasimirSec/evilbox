@@ -157,7 +157,7 @@ def test_cli_sandbox_help_mentions_first_build(capsys):
     else:
         raise AssertionError("expected --help to exit")
     out = capsys.readouterr().out
-    assert "several minutes" in out
+    assert "vendored" in out.lower() or "offline" in out.lower() or "no network" in out.lower()
     assert "Docker" in out or "docker" in out
 
 

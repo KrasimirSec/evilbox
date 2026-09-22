@@ -62,7 +62,7 @@ def _run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedP
     return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
 
 
-def _run_logged(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_logged(cmd: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run a command, echoing its output live so long jobs are not silent."""
     proc = subprocess.Popen(
         cmd,
@@ -70,6 +70,7 @@ def _run_logged(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     chunks: list[str] = []
 
@@ -132,7 +133,10 @@ def context_digest(context: Path, dockerfile: Path) -> str:
         rel = path.relative_to(context).as_posix().encode("utf-8")
         hasher.update(rel)
         hasher.update(b"\0")
-        hasher.update(path.read_bytes())
+        if path.name.endswith(".tar.gz"):
+            hasher.update(str(path.stat().st_size).encode("ascii"))
+        else:
+            hasher.update(path.read_bytes())
         hasher.update(b"\0")
     return hasher.hexdigest()[:16]
 
@@ -160,23 +164,67 @@ def prepare_sandbox_image(php_version: str) -> tuple[Path, Path, str]:
         return context, dockerfile, tag
     _status(
         f"building sandbox image {tag} (PHP {php_version}; "
-        "first run pulls the PHP base image and compiles evalhook — often several minutes)"
+        "offline — unpacks vendored PHP and evalhook, no registry or apt)"
     )
     build_image(context, tag, dockerfile=dockerfile)
     return context, dockerfile, tag
 
 
+def docker_server_arch() -> str:
+    """linux/amd64 or linux/arm64 as Docker TARGETARCH."""
+    try:
+        proc = _run(["docker", "version", "--format", "{{.Server.Arch}}"], timeout=DOCKER_INFO_TIMEOUT)
+        arch = (proc.stdout or "").strip().lower()
+        if proc.returncode == 0 and arch:
+            if arch in {"aarch64", "arm64"}:
+                return "arm64"
+            if arch in {"x86_64", "amd64"}:
+                return "amd64"
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    machine = os.uname().machine.lower() if hasattr(os, "uname") else ""
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    return "amd64"
+
+
+def _rootfs_tarball_name(dockerfile: Path, arch: str) -> str:
+    name = dockerfile.name
+    if name.endswith("7.4"):
+        version = "7.4.33"
+    elif name.endswith("5.6"):
+        version = "5.6"
+    else:
+        version = "8.3.33"
+    return f"php-{version}-cli-alpine-linux-{arch}.tar.gz"
+
+
 def build_image(context: Path, tag: str, *, dockerfile: Path | None = None) -> None:
-    cmd = ["docker", "build", "--progress=plain", "-t", tag]
+    arch = docker_server_arch()
+    offline = dockerfile is None or not dockerfile.name.endswith("5.6")
+    cmd = ["docker", "build", "--progress=plain"]
+    if offline:
+        cmd.extend(["--network", "none"])
+    cmd.extend(["--build-arg", f"TARGETARCH={arch}", "-t", tag])
     if dockerfile is not None:
         cmd.extend(["-f", str(dockerfile)])
+        if offline:
+            tarball = context / "vendor" / "rootfs" / _rootfs_tarball_name(dockerfile, arch)
+            if not tarball.is_file():
+                raise SandboxError(
+                    f"missing vendored PHP rootfs {tarball}. "
+                    "Run from a full Evilbox checkout (sandbox/php/vendor/rootfs)."
+                )
     cmd.append(str(context))
+    env = os.environ.copy()
+    env["DOCKER_BUILDKIT"] = "1"
     try:
-        proc = _run_logged(cmd, timeout=DOCKER_BUILD_TIMEOUT)
+        proc = _run_logged(cmd, timeout=DOCKER_BUILD_TIMEOUT, env=env)
     except subprocess.TimeoutExpired as exc:
         raise SandboxError(
             f"docker build timed out after {DOCKER_BUILD_TIMEOUT}s. "
-            "Check network access to pull the PHP image, or omit --sandbox for static decode."
+            "The sandbox image is offline; a hang usually means Docker is unpacking the vendored PHP rootfs. "
+            "Omit --sandbox for static decode."
         ) from exc
     if proc.returncode != 0:
         raise SandboxError(
