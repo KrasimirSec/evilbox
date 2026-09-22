@@ -168,6 +168,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - javascript-obfuscator / obfuscator.io / sojson / jsjiami string-array + rotator + index decoder, including base64, RC4, and hex array encodings
 - JSFuck (`[]()!+`) Function-constructor payloads, percent-encoded bookmarklets, jjencode, and a best-effort AAEncode unwrap
 - Split identifiers: `$f = "bas"."e64"."_dec"."ode"` and `$f .= ...` / JS `"at"+"ob"` / `window['at'+'ob']`
+- PHP PAS-family cookie/POST autokey (`md5($p).substr(md5(strrev($p)),0,strlen($p))`, byte subtract, `gzinflate`, `create_function`). A small list of common webshell passwords is tried; the recovered key is reported
 
 **Dynamic execution (static splice when the callback and payload are constants)**
 
@@ -181,7 +182,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - Fold `file_get_contents(__FILE__)` / `__DIR__` sibling payloads when the extra file is next to the sample
 - Rename `_0x…`, lookalike `O0Il` names, long underscore names, and non-ASCII identifier homoglyphs
 
-**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample; EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
+**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample (PAS cookie autokey is unwrapped when the password is a common webshell key); EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
 
 `gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 2 MiB. Incomplete streams are refused (no unbounded `flush()`).
 

@@ -45,6 +45,10 @@ _HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("halt-compiler", re.compile(r"__halt_compiler\s*\(", re.I)),
     ("self-read", re.compile(r"fopen\s*\(\s*__FILE__|file_get_contents\s*\(\s*__FILE__", re.I)),
     ("request-driven", re.compile(r"\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\s*\[", re.I)),
+    ("pas-keyed", re.compile(
+        r"md5\s*\(\s*\$\w+\s*\)\s*\.\s*substr\s*\(\s*md5\s*\(\s*strrev",
+        re.I,
+    )),
     ("auto-prepend", re.compile(r"auto_prepend_file|auto_append_file", re.I)),
     ("string-xor", re.compile(r"""['"][^'"]{4,}['"]\s*\^\s*['"]""")),
     ("goto-labels", re.compile(r"\bgoto\s+\w+", re.I)),
