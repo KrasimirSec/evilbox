@@ -51,6 +51,13 @@ _HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     )),
     ("auto-prepend", re.compile(r"auto_prepend_file|auto_append_file", re.I)),
     ("string-xor", re.compile(r"""['"][^'"]{4,}['"]\s*\^\s*['"]""")),
+    ("xor-chr-loop", re.compile(r"chr\s*\(\s*ord\s*\([^)]+\)\s*\^\s*ord\s*\(", re.I)),
+    ("hex-php-blob", re.compile(r"\$\w+\s*=\s*'[0-9a-fA-F]{80,}'", re.I)),
+    ("hex2ascii", re.compile(r"\bhex2ascii\s*\(", re.I)),
+    ("quoted-eval-chain", re.compile(
+        r"""(?:print|echo)\s+['"]eval\s*\(\s*(?:gzinflate|gzuncompress|gzdecode)\s*\(\s*base64_decode""",
+        re.I,
+    )),
     ("goto-labels", re.compile(r"\bgoto\s+\w+", re.I)),
     ("control-flow-flatten", re.compile(r"while\s*\(.+\)\s*\{[^}]{0,80}\bswitch\s*\(", re.S | re.I)),
     ("self-defending", re.compile(r"\bdebugger\b|toString\s*\[|integrity", re.I)),

@@ -358,7 +358,36 @@ def parse_quoted_string(literal: str) -> str | None:
 def unescape_html_entities(text: str) -> str:
     if "&#" not in text and "&" not in text:
         return text
-    return html.unescape(text)
+    out = html.unescape(text)
+    if any(ord(ch) > 255 for ch in out):
+        return text
+    return out
+
+
+def looks_like_php_source(text: str) -> bool:
+    sample = text.lstrip()
+    if sample.startswith("<?") or sample.startswith("?>"):
+        return True
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "<?php",
+            "$_get",
+            "$_post",
+            "$_cookie",
+            "eval(",
+            "echo ",
+            "print ",
+            "function ",
+            "system(",
+            "$auth_pass",
+            "filesman",
+            "gzinflate",
+            "base64_decode",
+            "create_function",
+        )
+    )
 
 
 def percent_decode(text: str) -> str | None:

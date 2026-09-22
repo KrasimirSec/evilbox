@@ -84,14 +84,21 @@ def apply_replacements(source: str, replacements: list[tuple[int, int, str]]) ->
         kept.append((start, end, text))
     out = data
     for start, end, text in sorted(kept, key=lambda r: r[0], reverse=True):
-        out = out[:start] + text.encode(encoding) + out[end:]
-    return out.decode(encoding)
+        try:
+            piece = text.encode(encoding)
+        except UnicodeEncodeError:
+            piece = text.encode(encoding, errors="replace")
+        out = out[:start] + piece + out[end:]
+    try:
+        return out.decode(encoding)
+    except UnicodeDecodeError:
+        return out.decode(encoding, errors="replace")
 
 
 def node_text(source: str, node) -> str:
     encoding = _enc()
     data = source.encode(encoding)
-    return data[node.start_byte : node.end_byte].decode(encoding)
+    return data[node.start_byte : node.end_byte].decode(encoding, errors="replace")
 
 
 def walk(node):

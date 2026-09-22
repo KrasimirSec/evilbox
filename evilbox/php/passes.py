@@ -14,6 +14,7 @@ from evilbox.decode import (
     gzip_bytes,
     hex_decode,
     hex_payload_to_text,
+    looks_like_php_source,
     parse_quoted_string,
     php_bitwise_not,
     php_quote,
@@ -132,6 +133,7 @@ def transform_php(
         env.path = path
         env.original = original if original is not None else source
         replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, php_quote))
+        replacements.extend(_xor_loop_replacements(tree, source, env))
         for node in walk(tree.root_node):
             rendered = _render_if_simplified(node, source, env)
             if rendered is None:
@@ -229,6 +231,226 @@ def collect_env(tree, source: str) -> FoldEnv:
             env.record(node, name, None, True)
             env.drop(left, name)
     return env
+
+
+def _php_var_name(node, source: str) -> str | None:
+    if node is None:
+        return None
+    if node.type == "variable_name":
+        return node_text(source, node).lstrip("$")
+    return None
+
+
+def _ord_index_var(node, source: str) -> tuple[str, str, int | None] | None:
+    """ord($data[$i]) or ord($key[$i % N]) → (array, index, modulo)."""
+    if node.type != "function_call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    if fn is None or fn.type != "name" or node_text(source, fn).lower() != "ord":
+        return None
+    args = _call_args(node)
+    if len(args) != 1 or args[0].type != "subscript_expression":
+        return None
+    named = args[0].named_children
+    if len(named) < 2:
+        return None
+    arr = _php_var_name(named[0], source)
+    index_node = named[1]
+    if arr is None:
+        return None
+    if index_node.type == "variable_name":
+        return arr, node_text(source, index_node).lstrip("$"), None
+    if index_node.type == "binary_expression" and _binary_op(index_node, source) == "%":
+        left = index_node.child_by_field_name("left")
+        right = index_node.child_by_field_name("right")
+        if left is None or right is None:
+            return None
+        idx = _php_var_name(left, source)
+        if idx is None:
+            return None
+        mod = None
+        if right.type == "integer":
+            try:
+                mod = int(node_text(source, right), 0)
+            except ValueError:
+                return None
+        elif right.type == "function_call_expression":
+            rfn = right.child_by_field_name("function")
+            if rfn is None or node_text(source, rfn).lower() != "strlen":
+                return None
+        return arr, idx, mod
+    return None
+
+
+def _parse_xor_for(node, source: str) -> tuple[str, str, str, int | None] | None:
+    if node.type != "for_statement":
+        return None
+    cond = node.child_by_field_name("condition")
+    body = node.child_by_field_name("body")
+    if cond is None or body is None:
+        return None
+    count: int | None = None
+    if cond.type == "binary_expression" and _binary_op(cond, source) in {"<", "<="}:
+        right = cond.child_by_field_name("right")
+        if right is not None and right.type == "integer":
+            try:
+                count = int(node_text(source, right), 0)
+            except ValueError:
+                count = None
+    stmt = body
+    if body.type == "compound_statement" and len(body.named_children) == 1:
+        stmt = body.named_children[0]
+    expr = stmt.named_children[0] if stmt.type == "expression_statement" and stmt.named_children else stmt
+    if expr.type != "augmented_assignment_expression":
+        return None
+    op_node = expr.child_by_field_name("operator")
+    op = op_node.type if op_node is not None else node_text(source, expr)
+    if op != ".=":
+        return None
+    out_name = _php_var_name(expr.child_by_field_name("left"), source)
+    right = expr.child_by_field_name("right")
+    if out_name is None or right is None or right.type != "function_call_expression":
+        return None
+    rfn = right.child_by_field_name("function")
+    if rfn is None or node_text(source, rfn).lower() != "chr":
+        return None
+    chr_args = _call_args(right)
+    if len(chr_args) != 1 or chr_args[0].type != "binary_expression" or _binary_op(chr_args[0], source) != "^":
+        return None
+    xor = chr_args[0]
+    left_ord = _ord_index_var(xor.child_by_field_name("left"), source)
+    right_ord = _ord_index_var(xor.child_by_field_name("right"), source)
+    if left_ord is None or right_ord is None:
+        return None
+    data_name, _, _ = left_ord
+    key_name, _, _ = right_ord
+    return data_name, key_name, out_name, count
+
+
+def _peel_php_expr(node):
+    expr = node
+    if node is not None and node.type == "expression_statement" and node.named_children:
+        expr = node.named_children[0]
+    while expr is not None and expr.type in {
+        "error_suppression_expression",
+        "parenthesized_expression",
+        "unary_op_expression",
+        "unary_expression",
+    }:
+        inner = expr.child_by_field_name("body")
+        if inner is None and expr.named_children:
+            inner = expr.named_children[0]
+        if inner is None:
+            break
+        expr = inner
+    return expr
+
+
+def _decoder_of_var(node, source: str, env: FoldEnv, out_name: str) -> str | None:
+    expr = _peel_php_expr(node)
+    arg = None
+    if expr is None:
+        return None
+    if expr.type == "eval_expression":
+        arg = expr.named_children[0] if expr.named_children else None
+    elif expr.type == "function_call_expression":
+        name = _call_name(expr, source, env)
+        if name not in {"eval", "assert", "print", "echo"}:
+            return None
+        args = _call_args(expr)
+        arg = args[0] if args else None
+    elif expr.type in {"echo_statement", "print_intrinsic_expression", "print_expression"}:
+        named = [child for child in expr.named_children if child.type != "echo"]
+        arg = named[0] if named else None
+    if arg is None:
+        return None
+    arg = _peel_php_expr(arg)
+    if arg is None or arg.type != "function_call_expression":
+        return None
+    args = _call_args(arg)
+    if len(args) != 1 or _php_var_name(args[0], source) != out_name:
+        return None
+    return _call_name(arg, source, env)
+
+
+def _value_bytes(val: Value | None) -> bytes | None:
+    if val is None:
+        return None
+    if isinstance(val.py, bytes):
+        return val.py
+    if isinstance(val.py, str):
+        try:
+            return php_string_bytes(val.py)
+        except ValueError:
+            return None
+    return None
+
+
+def _apply_known_decoder(name: str | None, data: bytes) -> bytes | None:
+    if not name or not data:
+        return None
+    key = name.lstrip("\\").lower()
+    if key == "gzinflate":
+        return raw_inflate(data)
+    if key == "gzuncompress":
+        return zlib_bytes(data)
+    if key == "gzdecode":
+        return gzip_bytes(data)
+    if key in {"bzdecompress", "bzinflate"}:
+        return bzip_bytes(data)
+    if key == "base64_decode":
+        text = data.decode("latin-1")
+        return b64decode(text)
+    if key in {"hex2bin", "hex2ascii", "hextobin", "unhex"}:
+        return hex_decode(data.decode("latin-1"))
+    return None
+
+
+def _xor_loop_replacements(tree, source: str, env: FoldEnv) -> list[tuple[int, int, str]]:
+    """for ($i=0;$i<N;$i++) $out.=chr(ord($data[$i])^ord($key[$i%K])); eval($decoder($out));"""
+    out: list[tuple[int, int, str]] = []
+    for node in walk(tree.root_node):
+        if node.type != "for_statement":
+            continue
+        parsed = _parse_xor_for(node, source)
+        if parsed is None:
+            continue
+        data_name, key_name, out_name, count = parsed
+        data = _value_bytes(env.reaching(node, data_name))
+        key = _value_bytes(env.reaching(node, key_name))
+        if data is None or key is None:
+            continue
+        if count is not None:
+            data = data[:count]
+        xored = xor_bytes(data, key)
+        if xored is None:
+            continue
+        parent = node.parent
+        if parent is None:
+            continue
+        siblings = list(parent.named_children)
+        try:
+            index = siblings.index(node)
+        except ValueError:
+            continue
+        if index + 1 >= len(siblings):
+            continue
+        nxt = siblings[index + 1]
+        decoder = _decoder_of_var(nxt, source, env, out_name)
+        payload = _apply_known_decoder(decoder, xored)
+        if payload is None:
+            payload = xored
+        try:
+            text = payload.decode("latin-1")
+        except Exception:
+            continue
+        if not looks_like_php_source(text) and "echo" not in text.lower():
+            continue
+        start = node.start_byte
+        _, end = stmt_span(source, nxt)
+        out.append((start, end, _strip_php_tags(text)))
+        env.warnings.append(f"Unwrapped repeating-XOR loop ({decoder or 'bytes'}).")
+    return out
 
 
 def _tainted_php_names(tree, source: str) -> set[str | ScopeKey]:
@@ -373,6 +595,8 @@ def _simplified_string(node, source: str) -> str | None:
     if parsed is None:
         return None
     unescaped = unescape_html_entities(parsed)
+    if "\0" in unescaped:
+        return None
     quoted = php_quote(unescaped)
     if quoted == raw:
         return None
@@ -399,11 +623,21 @@ def _php_string_value(node, source: str) -> str | None:
     return None
 
 
+def _looks_printable_text(text: str) -> bool:
+    if not text or "\0" in text[:200]:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable() or ch in "\n\r\t")
+    return printable / len(text) >= 0.85
+
+
 def _format_value(val: Value) -> str | None:
     if val.splice_raw and isinstance(val.py, str):
         return val.py
     if isinstance(val.py, bytes):
-        return php_quote(val.py.decode("latin-1"))
+        text = val.py.decode("latin-1")
+        if not val.splice_raw and not looks_like_php_source(text) and not _looks_printable_text(text):
+            return None
+        return php_quote(text)
     if isinstance(val.py, list):
         parts: list[str] = []
         for item in val.py:
@@ -825,6 +1059,13 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         data = hex_decode(s)
         return Value(data) if data is not None else None
 
+    if name in {"hex2ascii", "hextobin", "unhex"} and values:
+        s = as_str(values[0])
+        if s is None:
+            return None
+        data = hex_decode(s)
+        return Value(data) if data is not None else None
+
     if name == "hexdec" and values:
         s = as_str(values[0]) if not _is_num(values[0].py) else None
         if _is_num(values[0].py):
@@ -1172,6 +1413,12 @@ def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None
             return None
         data = hex_decode(s)
         return Value(data) if data is not None else None
+    if name in {"hex2ascii", "hextobin", "unhex"} and values:
+        s = as_str(values[0])
+        if s is None:
+            return None
+        data = hex_decode(s)
+        return Value(data) if data is not None else None
     if name == "urldecode" and values:
         s = as_str(values[0])
         return Value(php_urldecode(s)) if s is not None else None
@@ -1214,11 +1461,7 @@ def _preg_eval_modifier(pattern: str) -> bool:
 
 
 def _looks_like_php_source(text: str) -> bool:
-    sample = text.lstrip()
-    if sample.startswith("<?"):
-        return True
-    lowered = text.lower()
-    return any(token in lowered for token in ("$_get", "$_post", "$_cookie", "eval(", "function ", "system("))
+    return looks_like_php_source(text)
 
 
 def _eval_include(node, source: str, env: FoldEnv | None) -> Value | None:
@@ -1252,6 +1495,14 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     if not _is_num(idx_val.py):
         return None
     idx = int(idx_val.py)
+    if reached is not None and isinstance(reached.py, str):
+        if 0 <= idx < len(reached.py):
+            return Value(reached.py[idx])
+        return None
+    if reached is not None and isinstance(reached.py, bytes):
+        if 0 <= idx < len(reached.py):
+            return Value(chr(reached.py[idx]))
+        return None
     elems = None
     if reached is not None and isinstance(reached.py, list):
         elems = reached.py

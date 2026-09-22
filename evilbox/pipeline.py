@@ -112,7 +112,7 @@ def deobfuscate(
             warnings.append("A pass produced unparseable code; keeping the previous version of that rewrite.")
             if unwrapped != text:
                 unwrap_tree = parse(unwrapped)
-                if not has_error(unwrap_tree.root_node):
+                if not has_error(unwrap_tree.root_node) and unwrapped != nxt:
                     text = unwrapped
                     layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
                     break
