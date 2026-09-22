@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Evilbox — static JS / PHP decoder</title>
   <meta name="description" content="Paste or upload obfuscated JavaScript or PHP. Evilbox unwraps it statically: no JS or PHP engine, nothing is executed.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='14' width='22' height='13' fill='%231a1412' stroke='%23e36a3d' stroke-width='1.5'/%3E%3Cpath d='M5 14L16 10L27 14' fill='none' stroke='%23e36a3d' stroke-width='1.5'/%3E%3Cpath d='M5 14L9 4L21 6.5L16 10' fill='%232a1d18' stroke='%23f3c15c' stroke-width='1.4'/%3E%3Cellipse cx='16' cy='8.2' rx='3.1' ry='3.4' fill='%23e36a3d'/%3E%3Ccircle cx='16' cy='12.4' r='2.05' fill='%23c4562f'/%3E%3Cpath d='M14.2 11.2C9 9.2 7 6.5 4.5 5.5M13.5 12.4C7.5 12.2 5.5 13.5 3 15.5M13.6 13.5C8.2 15.8 7 18.2 5.8 20.5M14.4 14.2C10.5 18 10.2 21 9.2 23M17.8 11.2C23 9.2 25 6.5 27.5 5.5M18.5 12.4C24.5 12.2 26.5 13.5 29 15.5M18.4 13.5C23.8 15.8 25 18.2 26.2 20.5M17.6 14.2C21.5 18 21.8 21 22.8 23' fill='none' stroke='%23f3c15c' stroke-width='1.15' stroke-linecap='round'/%3E%3Ccircle cx='15.2' cy='11.5' r='0.45' fill='%23f3c15c'/%3E%3Ccircle cx='16.8' cy='11.5' r='0.45' fill='%23f3c15c'/%3E%3C/svg%3E">
   <style>
     :root {
       --bg: #0c0d10;
@@ -53,6 +54,8 @@
       display: grid; place-items: center;
       box-shadow: inset 0 0 0 1px rgba(227, 106, 61, 0.25);
     }
+    .mark svg { display: block; }
+    .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: flex-end; }
     .brand h1 {
       font-size: 1.15rem;
       letter-spacing: 0.14em;
@@ -220,10 +223,16 @@
 <body>
   <header>
     <div class="brand">
-      <div class="mark" aria-hidden="true">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-          <rect x="4" y="9" width="16" height="11" stroke="#e36a3d" stroke-width="1.6"/>
-          <path d="M8 9V7a4 4 0 0 1 8 0v2" stroke="#f3c15c" stroke-width="1.6"/>
+      <div class="mark" role="img" aria-label="Evilbox: a crate with a spider climbing out">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <rect x="5" y="14" width="22" height="13" fill="#1a1412" stroke="#e36a3d" stroke-width="1.5"/>
+          <path d="M5 14L16 10L27 14" stroke="#e36a3d" stroke-width="1.5"/>
+          <path d="M5 14L9 4L21 6.5L16 10" fill="#2a1d18" stroke="#f3c15c" stroke-width="1.4"/>
+          <ellipse cx="16" cy="8.2" rx="3.1" ry="3.4" fill="#e36a3d"/>
+          <circle cx="16" cy="12.4" r="2.05" fill="#c4562f"/>
+          <path d="M14.2 11.2C9 9.2 7 6.5 4.5 5.5M13.5 12.4C7.5 12.2 5.5 13.5 3 15.5M13.6 13.5C8.2 15.8 7 18.2 5.8 20.5M14.4 14.2C10.5 18 10.2 21 9.2 23M17.8 11.2C23 9.2 25 6.5 27.5 5.5M18.5 12.4C24.5 12.2 26.5 13.5 29 15.5M18.4 13.5C23.8 15.8 25 18.2 26.2 20.5M17.6 14.2C21.5 18 21.8 21 22.8 23" stroke="#f3c15c" stroke-width="1.15" stroke-linecap="round"/>
+          <circle cx="15.2" cy="11.5" r="0.45" fill="#f3c15c"/>
+          <circle cx="16.8" cy="11.5" r="0.45" fill="#f3c15c"/>
         </svg>
       </div>
       <div>
@@ -231,7 +240,9 @@
         <p>Static JavaScript and PHP deobfuscator</p>
       </div>
     </div>
-    <div class="pill">Not executed</div>
+    <div class="pills">
+      <div class="pill" title="The web UI never runs JavaScript or PHP. Decode rewrites encodings and the syntax tree in-process. Isolated PHP execution is CLI-only: evilbox --sandbox observe">Not executed</div>
+    </div>
   </header>
   <main>
     <section class="card" aria-labelledby="input-title">
@@ -254,9 +265,10 @@
         </div>
         <div class="examples" id="examples"></div>
         <p class="note">
-          Unwraps encodings and rewrites the syntax tree in-process. No JS engine, no PHP engine,
-          and the Docker sandbox is not available here. Submissions are kept in memory for this
-          request only.
+          <strong>Not executed</strong> means this page never runs the sample. There is no JS engine
+          and no PHP engine over HTTP — only static unwraps and AST rewrites, in memory for this request.
+          To actually run PHP in an isolated Docker lab, use the CLI:
+          <code>evilbox sample.php --sandbox observe</code>. JavaScript stays static even there.
         </p>
       </div>
     </section>
