@@ -149,6 +149,27 @@ def _sni_callback(sock, server_name, _ctx):
     sock.context = _leaf_for_host(name)
 
 
+def apply_cors(handler) -> None:
+    """Browser JS fetch/XHR to C2 needs CORS; PHP clients ignore the headers."""
+    origin = handler.headers.get("Origin")
+    if origin:
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Access-Control-Allow-Credentials", "true")
+        handler.send_header("Vary", "Origin")
+    else:
+        handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header(
+        "Access-Control-Allow-Methods",
+        "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD",
+    )
+    allow = handler.headers.get("Access-Control-Request-Headers") or (
+        "Content-Type, Authorization, X-Requested-With, Cookie, Accept"
+    )
+    handler.send_header("Access-Control-Allow-Headers", allow)
+    handler.send_header("Access-Control-Expose-Headers", "*")
+    handler.send_header("Access-Control-Max-Age", "600")
+
+
 def _log_domain(host: str) -> None:
     host = (host or "").strip().lower().split(":")[0]
     if not host:
@@ -201,6 +222,7 @@ class SinkHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Connection", "close")
+        apply_cors(self)
         self.end_headers()
         self.wfile.write(payload)
 

@@ -254,7 +254,7 @@ def make_server(host: str = "127.0.0.1", port: int = 8080) -> ThreadingHTTPServe
 def serve_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="evilbox serve",
-        description="Open a local web UI where anyone can paste or upload a JS/PHP sample for static decoding. The PHP sandbox is not exposed.",
+        description="Open a local web UI where anyone can paste or upload a JS/PHP sample for static decoding. The Docker sandbox is not exposed.",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")

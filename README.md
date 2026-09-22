@@ -2,7 +2,7 @@
 
 CLI that **statically** deobfuscates JavaScript and PHP, then helps with **analysis and classification**. It unwraps common encodings, rewrites the syntax tree, labels capabilities and malware roles, extracts IOCs, and suggests **scanner-visible** strings from the original packed file. `evilbox serve` exposes the same static path as a paste/upload web UI.
 
-It does **not** execute the input in a JS or PHP engine. The optional Docker PHP sandbox is a separate, isolated lab (CLI only).
+It does **not** execute the input in a JS or PHP engine. The optional Docker labs (PHP evalhook, headless Chromium for JavaScript) are separate, isolated, and CLI-only.
 
 ## Install
 
@@ -34,6 +34,7 @@ evilbox packed.php --report report.json --html report.html
 evilbox ./samples -o ./evilbox-out
 evilbox packed.php --sandbox dump
 evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
+evilbox packed.js --sandbox observe --sandbox-host www.shop.test --timeout 25
 ```
 
 | Flag | Meaning |
@@ -44,12 +45,13 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--html PATH` | HTML report |
 | `--max-passes N` | Unwrap/fold iterations (default: 16) |
 | `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Default **8.3**. `7.4` still exists for string `assert` / `create_function` / `preg_replace /e`. 8.3 and 7.4 are vendored offline images; 5.6 still pulls `php:5.6-cli` |
-| `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
-| `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape inside the sandbox |
+| `--sandbox dump\|observe` | Isolated Docker lab: PHP evalhook, or headless Chromium for JS |
+| `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape (UA / referrer / cookies) |
+| `--sandbox-host HOST` | Hostname the JS lab spoofs as the HTTPS origin |
 | `--keep-name` | Mount the sample under its original filename inside the sandbox |
 | `--stage-file PATH` | Bytes the sandbox HTTP/HTTPS sink serves instead of `OK` (second-stage replay) |
 | `--logs-dir PATH` | Sandbox log root (default: `EVILBOX_LOGS` or `./sandbox-logs`) |
-| `--timeout N` | Sandbox PHP timeout in seconds (default: 15) |
+| `--timeout N` | Sandbox timeout in seconds (default: 15; JS visits use at least 20) |
 | `serve` | Local web UI + JSON API for paste/upload decoding |
 
 If the input is a directory, Evilbox walks `.js` / `.php` files and mirrors the relative layout under the output directory (`a/index.php` and `b/index.php` become `a/index.clean.php` and `b/index.clean.php`). Each file is decoded in isolation: a crash in one sample does not abort the batch. `clusters.json` groups similar inner layers with a token n-gram minhash (so a changed domain or key still groups a family). `cluster_sha256` remains an exact whitespace-normalized hash of the inner text.
@@ -91,7 +93,7 @@ curl --data-binary @packed.php -H 'Content-Type: text/plain' \
   'http://127.0.0.1:8080/api/decode?lang=php&filename=packed.php'
 ```
 
-The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The header badge **Not executed** is that guarantee, not a failed run. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). Each decode runs in a **subprocess** with CPU/address rlimits; a hang is killed with SIGKILL (a worker thread cannot interrupt a catastrophic regex). The UI is same-origin: there is no `Access-Control-Allow-Origin: *`.
+The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The header badge **Not executed** is that guarantee, not a failed run. The Docker labs (`--sandbox dump|observe` for PHP evalhook or headless Chromium) stay CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). Each decode runs in a **subprocess** with CPU/address rlimits; a hang is killed with SIGKILL (a worker thread cannot interrupt a catastrophic regex). The UI is same-origin: there is no `Access-Control-Allow-Origin: *`.
 
 The no-argument menu also has **Open the web decoder**.
 
@@ -233,6 +235,29 @@ Inside the container:
 Logs land in `./sandbox-logs/<timestamp-id>/` (`domains.txt`, `http.jsonl`, `dns.log`, `eval-*.php`, `deobfuscated.php`, `indicators.json`, `report.json`, `traffic.pcap`). Stdout is the static cleanup of the last eval dump (or the original file if none). Classification still uses the **original** file for surface signatures.
 
 Requires Docker. The sample never gets a route to the public internet (`--network none`). That is still **malware execution inside the container** in `observe` mode — only use samples you intend to analyze.
+
+## JavaScript sandbox (headless Chromium, no real internet)
+
+Optional Docker lab for packed JavaScript. Same daemon requirement as the PHP lab. The sample is **not** run with `node` or as `file://` — those are obvious tells. Instead Chromium loads a shop-like HTTPS page on a spoofed hostname.
+
+```bash
+bin/evilbox packed.js --sandbox observe --logs-dir ./sandbox-logs --timeout 25
+bin/evilbox packed.js --sandbox observe --sandbox-host checkout.victim-shop.test --sandbox-profile google-referrer
+```
+
+First run **builds** `evilbox-js-sandbox:<hash>` and installs Debian Chromium (hundreds of MB; too large to vendor in git). That needs network **once**. Later runs reuse the image. PHP 8.3/7.4 labs stay offline.
+
+What the sample sees:
+
+- `https://<host>/` is a real-looking storefront (nav, CSS, favicon). The sample is `/assets/app.min.js`, not an inline blob.
+- `<host>` is `--sandbox-host`, or the first non-CDN domain found in the file, or `www.shop-assets.net`.
+- Default and `google-referrer` profiles open a Google-like results page first and **click through**, so `document.referrer` is a search URL.
+- `googlebot` uses the Googlebot UA and goes direct. `wp-cookie` sets WordPress cookies on the spoofed host.
+- `navigator.webdriver` is hidden; UA is desktop Chrome (not `HeadlessChrome`); viewport is 1920×1080. That is **best-effort** camouflage, not a claim that the sample cannot fingerprint the lab.
+- `eval` / `Function` / string `setTimeout` are logged to `/logs/php/eval-*.js`. **dump** records them and does not run them; **observe** records and runs.
+- Call-home still hits the same DNS/HTTP/HTTPS/TCP sink as PHP (`--network none`). The sink sends CORS headers so `fetch` / XHR can finish. Downloads land in `/logs/downloads`. Chromium network events, a screenshot, and `location.json` (`href`, `document.referrer`) are saved.
+
+The web UI never starts this lab.
 
 ### Supply chain (sandbox image)
 

@@ -1,0 +1,12 @@
+body{margin:0;font-family:Georgia,"Times New Roman",serif;color:#1b1b1b;background:#faf7f2}
+.wrap{max-width:960px;margin:0 auto;padding:16px 20px}
+.top{border-bottom:1px solid #e6dfd4;background:#fff}
+.logo{font-weight:700;letter-spacing:.04em;text-decoration:none;color:#111;margin-right:24px}
+nav a{margin-right:16px;color:#444;text-decoration:none;font-family:Arial,sans-serif;font-size:14px}
+.hero{padding:48px 0 24px}
+.hero h1{font-size:42px;margin:0 0 12px}
+.btn{display:inline-block;background:#111;color:#fff;padding:10px 18px;text-decoration:none;border-radius:2px;font-family:Arial,sans-serif}
+.grid{display:flex;gap:16px;padding:12px 0 40px}
+.grid article{flex:1;background:#fff;padding:16px;border:1px solid #eee}
+footer{border-top:1px solid #e6dfd4;color:#666;font-size:13px}
+.fine{opacity:.7}

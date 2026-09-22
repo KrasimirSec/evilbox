@@ -23,3 +23,5 @@ def test_sink_does_not_import_cryptography():
     text = Path(sandbox_context_dir() / "sink.py").read_text(encoding="utf-8")
     assert "from cryptography" not in text
     assert "import cryptography" not in text
+    assert "def apply_cors" in text
+    assert "Access-Control-Allow-Origin" in text
