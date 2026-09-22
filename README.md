@@ -198,7 +198,9 @@ Not included: running a JavaScript or PHP engine over HTTP. The optional Docker 
 
 ## PHP sandbox (evalhook, no real internet)
 
-Optional Docker lab for packed PHP. Requires a **running Docker daemon**. The first run **builds** `evilbox-php-sandbox:<php>-<hash>` (pulls the PHP base image, compiles evalhook). That often takes several minutes; Evilbox prints `evilbox: …` status lines and streams `docker build --progress=plain` to stderr so it does not look hung. Later runs **reuse that image** and only start a container. The sample is never baked into the image.
+Optional Docker lab for packed PHP. Requires a **running Docker daemon** on **Linux or macOS** (Docker Desktop / Colima / OrbStack). Images are multi-arch (`linux/amd64` and `linux/arm64`); Apple Silicon does not need qemu. The first run **builds** `evilbox-php-sandbox:<php>-<hash>` (pulls the PHP base image, compiles evalhook). That often takes several minutes; Evilbox prints `evilbox: …` status lines and streams `docker build --progress=plain` to stderr so it does not look hung. Later runs **reuse that image** and only start a container. The sample is never baked into the image.
+
+On macOS and snap Docker, the sample is copied under `~/.cache/evilbox/docker-mounts/` before bind-mounting (those engines do not share `/tmp` by default). `--memory-swap` is omitted on macOS because Docker Desktop’s VM often rejects it.
 
 Each run **starts a new container with `--network none`, `--read-only`, `--cap-drop ALL` plus the setup caps (`NET_ADMIN`, `NET_RAW`, `NET_BIND_SERVICE`, …), `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`**. Docker’s default seccomp profile stays enabled. If a `runsc` (gVisor) runtime is installed it is used. The sample is bind-mounted read-only. **Logs are not bind-mounted.** After the process exits, the host copies `/logs` with `docker cp` and **rejects symlinks** before reading or writing `domains.txt` / `deobfuscated.php`. The PHP sample runs as uid 65534 with capabilities dropped; dnsmasq, tcpdump, and the HTTP sink start first as root. Nothing from the run is committed back into an image.
 
@@ -236,7 +238,7 @@ Requires Docker. The sample never gets a route to the public internet (`--networ
 
 - **evalhook** is **vendored** at a pinned commit under [`sandbox/php/vendor/php-eval-hook/`](sandbox/php/vendor/php-eval-hook/). The image **does not** `git clone` at build time. See [`sandbox/php/vendor/SOURCES.md`](sandbox/php/vendor/SOURCES.md) for the GitHub URL, commit, and archive SHA-256.
 - **PHP** is not stored in git. The Dockerfile uses `php:8.3-cli-bookworm@sha256:…` so the tag cannot drift. Docker still **pulls that digest once** if you do not already have it.
-- Extra Debian packages (`dnsmasq`, `python3-cryptography`, …) are still installed from apt on the first uncached build; they are not copied into this repo.
+- Extra Debian packages (`dnsmasq`, `python3-cryptography`, …) are installed from apt on the first uncached build. PHP 7.4/5.6 use `archive.debian.org` (live bullseye-security 404s after LTS, including on Apple Silicon).
 
 ## Tests
 

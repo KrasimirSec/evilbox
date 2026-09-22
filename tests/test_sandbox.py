@@ -8,12 +8,15 @@ from evilbox.sandbox import (
     SandboxError,
     build_image,
     cached_image_tag,
+    cleanup_bind_stage,
     docker_run_args,
+    docker_supports_memory_swap,
     ensure_docker,
     finalize_logs,
     prepare_sandbox_image,
     sandbox_context_dir,
     sandbox_dockerfile,
+    stage_bind_source,
     _run_logged,
 )
 
@@ -30,6 +33,14 @@ def test_sandbox_dockerfile_present():
     assert "git clone" not in text
     assert "vendor/php-eval-hook" in text
     assert "@sha256:" in text
+    assert (context / "debian-archive.sh").is_file()
+    archive_sh = (context / "debian-archive.sh").read_text(encoding="utf-8")
+    assert "archive.debian.org" in archive_sh
+    dockerfile_74 = (context / "Dockerfile.7.4").read_text(encoding="utf-8")
+    assert "debian-archive.sh" in dockerfile_74
+    assert "php:7.4-cli-bullseye" in dockerfile_74
+    dockerfile_56 = (context / "Dockerfile.5.6").read_text(encoding="utf-8")
+    assert "debian-archive.sh" in dockerfile_56
     assert (context / "vendor" / "php-eval-hook" / "evalhook.c").is_file()
     assert (context / "tcp_logger.py").is_file()
     entry = (context / "entrypoint.sh").read_text(encoding="utf-8")
@@ -72,6 +83,42 @@ def test_docker_run_is_isolated(tmp_path):
     assert "no-new-privileges" in joined
     assert "seccomp=unconfined" not in joined
     assert "NET_ADMIN" in joined
+    if docker_supports_memory_swap():
+        assert "--memory-swap" in args
+    else:
+        assert "--memory-swap" not in args
+    mount = next(item for item in args if item.startswith("type=bind,src="))
+    src = mount.split("src=", 1)[1].split(",", 1)[0]
+    assert Path(src).is_absolute()
+
+
+def test_docker_run_omits_memory_swap_on_macos(tmp_path, monkeypatch):
+    monkeypatch.setattr("evilbox.sandbox.sys.platform", "darwin")
+    sample = tmp_path / "sample.php"
+    sample.write_text("<?php echo 1;", encoding="utf-8")
+    args = docker_run_args(
+        tag="evilbox-php-sandbox:test",
+        sample=sample,
+        mode="observe",
+        timeout=15,
+        container_name="evilbox-test",
+    )
+    assert "--memory" in args
+    assert "--memory-swap" not in args
+
+
+def test_stage_bind_source_copies_under_home_on_macos(tmp_path, monkeypatch):
+    share = tmp_path / "docker-mounts"
+    monkeypatch.setattr("evilbox.sandbox.sys.platform", "darwin")
+    monkeypatch.setattr("evilbox.sandbox.docker_mount_root", lambda: share)
+    src = tmp_path / "outside" / "sample.php"
+    src.parent.mkdir()
+    src.write_text("<?php echo 1;", encoding="utf-8")
+    dest = stage_bind_source(src, run_id="run1", name="sample.php")
+    assert dest == share / "run1" / "sample.php"
+    assert dest.read_text(encoding="utf-8") == "<?php echo 1;"
+    cleanup_bind_stage("run1")
+    assert not dest.exists()
 
 
 def test_finalize_logs_collects_domains(tmp_path):

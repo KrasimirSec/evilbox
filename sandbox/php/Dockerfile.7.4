@@ -1,7 +1,12 @@
 # PHP 7.4.33 CLI. Tag is frozen upstream (EOL). evalhook is compiled with the PHP 7 compile_string ABI.
+# Multi-arch (linux/amd64 and linux/arm64) so Docker Desktop on Apple Silicon does not need qemu.
 FROM php:7.4-cli-bullseye
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Bullseye left the live Debian mirrors in 2026; apt 404s without the archive rewrite.
+COPY debian-archive.sh /tmp/debian-archive.sh
+RUN /bin/sh /tmp/debian-archive.sh \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         $PHPIZE_DEPS \
         ca-certificates \
         dnsmasq \

@@ -1,7 +1,9 @@
 # Multi-arch index digest for php:8.3-cli-bookworm (PHP 8.3.33). Do not use a floating tag.
 FROM php:8.3-cli-bookworm@sha256:177529735599a8244b2c903522f029839dce1c2ac4be122fdc00ada4b45a20e4
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/99retries \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         $PHPIZE_DEPS \
         ca-certificates \
         dnsmasq \

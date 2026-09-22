@@ -201,6 +201,38 @@ def docker_has_runtime(name: str) -> bool:
     return name in (proc.stdout or "")
 
 
+def docker_mount_root() -> Path:
+    return Path.home() / ".cache" / "evilbox" / "docker-mounts"
+
+
+def restricted_file_sharing() -> bool:
+    """Docker Desktop (macOS) and snap Docker only share the home directory by default."""
+    if sys.platform == "darwin":
+        return True
+    docker_bin = shutil.which("docker") or ""
+    return "/snap/" in docker_bin
+
+
+def docker_supports_memory_swap() -> bool:
+    # Docker Desktop's Linux VM often rejects --memory-swap even when --memory works.
+    return sys.platform != "darwin"
+
+
+def stage_bind_source(src: Path, *, run_id: str, name: str) -> Path:
+    src = src.resolve()
+    if not restricted_file_sharing():
+        return src
+    dest_dir = docker_mount_root() / run_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    shutil.copy2(src, dest)
+    return dest
+
+
+def cleanup_bind_stage(run_id: str) -> None:
+    shutil.rmtree(docker_mount_root() / run_id, ignore_errors=True)
+
+
 def docker_run_args(
     *,
     tag: str,
@@ -214,14 +246,18 @@ def docker_run_args(
     keep_name: bool = False,
     stage_file: Path | None = None,
     gvisor: bool = False,
+    memory_swap: bool | None = None,
 ) -> list[str]:
     del log_dir  # logs are copied out after the run; never bind-mounted
     if profile not in SANDBOX_PROFILES:
         profile = "default"
+    if memory_swap is None:
+        memory_swap = docker_supports_memory_swap()
     sample_name = sample.name if keep_name else "sample.php"
     if "/" in sample_name or sample_name in {".", ".."} or not sample_name:
         sample_name = "sample.php"
     dst = f"/samples/{sample_name}"
+    sample_src = sample.resolve()
     args = [
         "docker",
         "run",
@@ -232,8 +268,11 @@ def docker_run_args(
         "--read-only",
         "--memory",
         "512m",
-        "--memory-swap",
-        "512m",
+    ]
+    if memory_swap:
+        args.extend(["--memory-swap", "512m"])
+    args.extend(
+        [
         "--cpus",
         "1",
         "--pids-limit",
@@ -269,14 +308,15 @@ def docker_run_args(
         "--env",
         f"SANDBOX_SAMPLE={dst}",
         "--mount",
-        f"type=bind,src={sample},dst={dst},readonly=true",
+        f"type=bind,src={sample_src},dst={dst},readonly=true",
         "--mount",
         "type=tmpfs,destination=/logs,tmpfs-mode=1777",
         "--mount",
         "type=tmpfs,destination=/tmp,tmpfs-mode=1777",
         "--mount",
         "type=tmpfs,destination=/run,tmpfs-mode=1777",
-    ]
+        ]
+    )
     if stage_file is not None:
         args.extend(
             [
@@ -457,16 +497,23 @@ def run_php_sandbox(
     log_dir = (logs_root / run_id).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    mount_name = sample.name if keep_name else "sample.php"
+    if "/" in mount_name or mount_name in {".", ".."} or not mount_name:
+        mount_name = "sample.php"
+    mount_sample = stage_bind_source(sample, run_id=run_id, name=mount_name)
+    mount_stage = (
+        stage_bind_source(stage_file, run_id=run_id, name="stage.bin") if stage_file is not None else None
+    )
     args = docker_run_args(
         tag=tag,
-        sample=sample,
+        sample=mount_sample,
         mode=mode,
         timeout=timeout,
         container_name=container_name,
         profile=profile,
         php_version=php_version,
-        keep_name=keep_name,
-        stage_file=stage_file,
+        keep_name=True,
+        stage_file=mount_stage,
         gvisor=docker_has_runtime("runsc"),
     )
     host_timeout = timeout + 90
@@ -477,16 +524,19 @@ def run_php_sandbox(
     proc: subprocess.CompletedProcess[str] | None = None
     timed_out = False
     try:
-        proc = _run(args, timeout=host_timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _status("container exceeded host timeout; killing it")
-        _run(["docker", "kill", container_name], timeout=30)
-    try:
-        _status("copying /logs out of the container")
-        _copy_container_logs(container_name, log_dir)
+        try:
+            proc = _run(args, timeout=host_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _status("container exceeded host timeout; killing it")
+            _run(["docker", "kill", container_name], timeout=30)
+        try:
+            _status("copying /logs out of the container")
+            _copy_container_logs(container_name, log_dir)
+        finally:
+            _run(["docker", "rm", "-f", container_name], timeout=30)
     finally:
-        _run(["docker", "rm", "-f", container_name], timeout=30)
+        cleanup_bind_stage(run_id)
 
     if proc is not None:
         (log_dir / "docker.stdout.log").write_text(proc.stdout or "", encoding="utf-8")
