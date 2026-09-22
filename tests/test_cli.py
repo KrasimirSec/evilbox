@@ -114,7 +114,7 @@ def test_cli_sandbox_docker_missing(tmp_path, monkeypatch, capsys):
     assert main([str(src), "--sandbox", "observe"]) == 2
     err = capsys.readouterr().err
     assert "docker is not installed" in err
-    assert "omit --sandbox" in err
+    assert "omit --sandbox" in err.lower()
     assert "Traceback" not in err
 
 
