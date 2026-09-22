@@ -1,1 +1,5 @@
 1a92f6ede3d97d9d5dff90ebad60bbd80625c0eabb42044e95cef13c2f52872d  php-eval-hook-25e4e2a9b84b4f4c45f3d2dfa35121ed7938b889.tar.gz
+f79735f3a0feb1b3da846d148db5afe25793dd18d641293cb2820693cae88918  rootfs/php-8.3.33-cli-alpine-linux-amd64.tar.gz
+fa3b49d608041612cb850f8315eb3665d885e80528f486cd88abd30a22ec16c1  rootfs/php-8.3.33-cli-alpine-linux-arm64.tar.gz
+e563f83fe92c5c4753bde35f5482e58fca9acae75f2e4508f42c9aca08a98455  rootfs/php-7.4.33-cli-alpine-linux-amd64.tar.gz
+7e87867a40ed8123b202fea77c8a11af3800d36542ec52201fec31bdd53aef5c  rootfs/php-7.4.33-cli-alpine-linux-arm64.tar.gz

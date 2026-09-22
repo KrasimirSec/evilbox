@@ -1,8 +1,12 @@
-# Official PHP image. Digest is a multi-arch index (amd64 + arm64), PHP 8.3.33-cli-bookworm.
-# Inspected 2026-08-28: docker buildx imagetools inspect php:8.3-cli-bookworm
-php:8.3-cli-bookworm@sha256:177529735599a8244b2c903522f029839dce1c2ac4be122fdc00ada4b45a20e4
-
-# Additional sandbox runtimes (EOL tags, frozen upstream):
-# php:7.4-cli-bullseye  (Dockerfile.7.4, evalhook PHP 7 ABI)
-# php:5.6-cli           (Dockerfile.5.6, no evalhook)
-
+# Official PHP images used to *seed* the offline rootfs tarballs.
+# Runtime docker builds do not pull these; they ADD vendor/rootfs/*.tar.gz.
+#
+# php:8.3.33-cli-alpine
+#   linux/amd64 sha256:6443da203cc731224936b7e842971f0067a596d60839144650ca5c11a2f3c98f
+#   linux/arm64 sha256:989d2bdaa98bcebcecd07604a1afd9c6659d4b874ab874b75e849a622399c872
+#
+# php:7.4.33-cli-alpine
+#   linux/amd64 sha256:1e1b3bb4ee1bcb039f559adb9a3fae391c87205ba239b619cdc239b78b7f2557
+#   linux/arm64 sha256:dbce323a8fd856cbd383920374bf9815c2f6503746ceb12e86ca3ec07545160a
+#
+# PHP 5.6 is not vendored (no evalhook). Dockerfile.5.6 still pulls php:5.6-cli.

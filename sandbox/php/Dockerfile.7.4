@@ -1,52 +1,14 @@
-# PHP 7.4.33 CLI. Frozen upstream tag; evalhook uses the PHP 7 compile_string ABI.
-# Multi-arch (linux/amd64 + linux/arm64) so Docker Desktop on Apple Silicon is native.
-FROM php:7.4-cli-bullseye
-
-# Debian 11 LTS is over. Live deb.debian.org/debian-security still advertises
-# packages (InRelease + Packages) then 404s the .debs. archive.debian.org has
-# bullseye main for amd64 and arm64, but has no bullseye-security suite — so
-# we replace sources with archive main only (no security repo).
-RUN set -eux; \
-    printf '%s\n' \
-      'deb http://archive.debian.org/debian bullseye main' \
-      > /etc/apt/sources.list; \
-    rm -rf /etc/apt/sources.list.d; \
-    printf '%s\n' \
-      'Acquire::Check-Valid-Until "false";' \
-      'Acquire::Retries "5";' \
-      > /etc/apt/apt.conf.d/99archive; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        $PHPIZE_DEPS \
-        ca-certificates \
-        dnsmasq \
-        gcc \
-        libc6-dev \
-        libcurl4-openssl-dev \
-        libzip-dev \
-        python3 \
-        python3-cryptography \
-        tcpdump \
-        iproute2 \
-        iptables \
-        util-linux \
-        zlib1g-dev; \
-    docker-php-ext-install curl zip; \
-    rm -rf /var/lib/apt/lists/*
-
-COPY vendor/php-eval-hook /usr/src/php-eval-hook
-RUN cd /usr/src/php-eval-hook \
-    && phpize \
-    && ./configure --enable-evalhook \
-    && make \
-    && make install \
-    && docker-php-ext-enable evalhook \
-    && rm -rf /usr/src/php-eval-hook
-
+# Offline PHP 7.4.33 CLI sandbox. Every byte comes from this build context.
+# `docker build --network=none` works. Do not FROM a registry image or apt-get.
+# evalhook is precompiled for the PHP 7 compile_string(zval *) ABI.
+FROM scratch
+ARG TARGETARCH=amd64
+ADD vendor/rootfs/php-7.4.33-cli-alpine-linux-${TARGETARCH}.tar.gz /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PHP_INI_DIR=/usr/local/etc/php \
+    PHP_INI_SCAN_DIR=/usr/local/etc/php/conf.d
 COPY php-sandbox.ini /usr/local/etc/php/conf.d/zz-sandbox.ini
-COPY entrypoint.sh prepend.php wp-stubs.php sink.py collect_domains.py tcp_logger.py dnsmasq.conf sleep_hook.c /opt/sandbox/
-RUN gcc -shared -fPIC -O2 -o /opt/sandbox/nosleep.so /opt/sandbox/sleep_hook.c \
-    && chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/sink.py /opt/sandbox/collect_domains.py /opt/sandbox/tcp_logger.py \
-    && mkdir -p /logs /samples /tmp/ca
-
+COPY entrypoint.sh prepend.php wp-stubs.php sink.py collect_domains.py tcp_logger.py dnsmasq.conf /opt/sandbox/
+RUN chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/sink.py /opt/sandbox/collect_domains.py /opt/sandbox/tcp_logger.py \
+    && mkdir -p /logs /samples /tmp/ca /run
 ENTRYPOINT ["/opt/sandbox/entrypoint.sh"]
