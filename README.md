@@ -171,6 +171,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - javascript-obfuscator / obfuscator.io / sojson / jsjiami string-array + rotator + index decoder, including base64, RC4, and hex array encodings
 - JSFuck (`[]()!+`) Function-constructor payloads, percent-encoded bookmarklets, jjencode, and a best-effort AAEncode unwrap
 - Split identifiers: `$f = "bas"."e64"."_dec"."ode"` and `$f .= ...` / JS `"at"+"ob"` / `window['at'+'ob']`
+- PHP charset-table indexes such as `$fn = $s[41].$s[16].…` used as `preg_replace /e` / `create_function` names
 
 **Dynamic execution (static splice when the callback and payload are constants)**
 

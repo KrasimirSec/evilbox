@@ -595,6 +595,8 @@ def _simplified_string(node, source: str) -> str | None:
     if parsed is None:
         return None
     unescaped = unescape_html_entities(parsed)
+    if "\0" in unescaped:
+        return None
     quoted = php_quote(unescaped)
     if quoted == raw:
         return None
@@ -1493,6 +1495,14 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     if not _is_num(idx_val.py):
         return None
     idx = int(idx_val.py)
+    if reached is not None and isinstance(reached.py, str):
+        if 0 <= idx < len(reached.py):
+            return Value(reached.py[idx])
+        return None
+    if reached is not None and isinstance(reached.py, bytes):
+        if 0 <= idx < len(reached.py):
+            return Value(chr(reached.py[idx]))
+        return None
     elems = None
     if reached is not None and isinstance(reached.py, list):
         elems = reached.py

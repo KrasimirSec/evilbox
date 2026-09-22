@@ -95,14 +95,14 @@ def deobfuscate(
             warnings.append(f"{hit.name}: {hit.detail}")
 
     for index in range(max(1, max_passes)):
-        nxt, unwrap_warnings = unwrap_source(text, lang)
+        unwrapped, unwrap_warnings = unwrap_source(text, lang)
         warnings.extend(unwrap_warnings)
         if lang == "php":
             transformed, pass_warnings = transform_php(
-                nxt, php_version=php_version, path=path, original=original
+                unwrapped, php_version=php_version, path=path, original=original
             )
         else:
-            transformed, pass_warnings = transform_js(nxt)
+            transformed, pass_warnings = transform_js(unwrapped)
         warnings.extend(pass_warnings)
         nxt = transformed
         if nxt == text:
@@ -110,6 +110,12 @@ def deobfuscate(
         tree = parse(nxt)
         if has_error(tree.root_node):
             warnings.append("A pass produced unparseable code; keeping the previous version of that rewrite.")
+            if unwrapped != text:
+                unwrap_tree = parse(unwrapped)
+                if not has_error(unwrap_tree.root_node) and unwrapped != nxt:
+                    text = unwrapped
+                    layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
+                    break
             prev_tree = parse(text)
             if not has_error(prev_tree.root_node):
                 break

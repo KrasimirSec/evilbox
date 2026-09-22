@@ -38,7 +38,12 @@ def test_php_repeating_xor_loop_eval():
 
 
 def test_php_hex2ascii_blob_unwrap():
-    payload = "$auth_pass = '';\nfunction FilesMan() { echo 'wso-hex'; }\n" + ("// pad\n" * 20)
+    payload = (
+        "$auth_pass = '';\n"
+        "function FilesMan() { echo 'wso-hex'; }\n"
+        '$x = addcslashes($y, "\\n\\r\\t\\\\\'\\0");\n'
+        + ("// pad\n" * 20)
+    )
     hexed = payload.encode("latin-1").hex()
     src = (
         "<?php\n"
@@ -81,6 +86,20 @@ def test_latin1_scan_unresolved_does_not_crash():
     src = "<?php echo '\x83\x94'; $x = base64_decode($y);"
     found = scan_unresolved(src, language="php", layer="test")
     assert isinstance(found, list)
+
+
+def test_php_charset_index_preg_replace_e():
+    alphabet = "149txndov)6c2gskr8imy7wq.0haj;_b35*lz(ue/pf"
+    src = (
+        "<?php\n"
+        f"$z = '{alphabet}';\n"
+        "$fn = $z[41].$z[16].$z[39].$z[13].$z[30].$z[16].$z[39].$z[41].$z[35].$z[27].$z[11].$z[39];\n"
+        "$pat = $z[40].$z[24].$z[34].$z[40].$z[39];\n"
+        "$code = \"echo 'idx-unpacked';\";\n"
+        '$fn($pat, $code, "673");\n'
+    )
+    result = deobfuscate(src, language="php")
+    assert "idx-unpacked" in result.text
 
 
 def test_html_entity_outside_latin1_does_not_crash():
