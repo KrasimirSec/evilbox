@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Evilbox — static JS / PHP decoder</title>
   <meta name="description" content="Paste or upload obfuscated JavaScript or PHP. Evilbox unwraps it statically: no JS or PHP engine, nothing is executed.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='16.2' width='24' height='13.3' rx='0.6' fill='%231a1412' stroke='%23e36a3d' stroke-width='1.45'/%3E%3Cpath d='M4 21.2h24M4 25.6h24M16 16.2v13.3' stroke='%23c4562f' stroke-width='0.7' opacity='0.65'/%3E%3Cpath d='M5 16.2L16 12.1L27 16.2L16 19Z' fill='%23080605'/%3E%3Cpath d='M5 16.2L16 12.1L27 16.2' fill='none' stroke='%23e36a3d' stroke-width='1.35'/%3E%3Cpath d='M5 16.2L8.2 2.8L22.2 4.6L16 12.1Z' fill='%232a1d18' stroke='%23f3c15c' stroke-width='1.35'/%3E%3Cellipse cx='16' cy='16.7' rx='3.55' ry='3.15' fill='%23c4562f'/%3E%3Cellipse cx='16' cy='12.15' rx='2.85' ry='3.05' fill='%23e36a3d'/%3E%3Cpath d='M14.2 11.1C10.1 8.2 7.6 5.4 4.4 3.9M13.5 12.5C8.2 11.8 5.6 13.1 2.6 16.2M13.7 14.2C8.4 16.6 6.9 19.5 5.4 23.2M14.4 15.6C10.6 19.4 10 23.1 9 26.4M17.8 11.1C21.9 8.2 24.4 5.4 27.6 3.9M18.5 12.5C23.8 11.8 26.4 13.1 29.4 16.2M18.3 14.2C23.6 16.6 25.1 19.5 26.6 23.2M17.6 15.6C21.4 19.4 22 23.1 23 26.4' fill='none' stroke='%23f3c15c' stroke-width='1.2' stroke-linecap='round'/%3E%3Ccircle cx='14.95' cy='11.25' r='0.72' fill='%23f3c15c'/%3E%3Ccircle cx='17.05' cy='11.25' r='0.72' fill='%23f3c15c'/%3E%3C/svg%3E">
   <style>
     :root {
       --bg: #0c0d10;
@@ -47,12 +48,14 @@
     }
     .brand { display: flex; align-items: center; gap: 0.85rem; }
     .mark {
-      width: 42px; height: 42px; flex: none;
+      width: 48px; height: 48px; flex: none;
       border: 1px solid var(--line);
       background: linear-gradient(160deg, #2a1d18, #15171d);
       display: grid; place-items: center;
       box-shadow: inset 0 0 0 1px rgba(227, 106, 61, 0.25);
     }
+    .mark svg { display: block; }
+    .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: flex-end; }
     .brand h1 {
       font-size: 1.15rem;
       letter-spacing: 0.14em;
@@ -220,10 +223,18 @@
 <body>
   <header>
     <div class="brand">
-      <div class="mark" aria-hidden="true">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-          <rect x="4" y="9" width="16" height="11" stroke="#e36a3d" stroke-width="1.6"/>
-          <path d="M8 9V7a4 4 0 0 1 8 0v2" stroke="#f3c15c" stroke-width="1.6"/>
+      <div class="mark" role="img" aria-label="Evilbox: a crate with a spider climbing out">
+        <svg width="36" height="36" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <rect x="4" y="16.2" width="24" height="13.3" rx="0.6" fill="#1a1412" stroke="#e36a3d" stroke-width="1.45"/>
+          <path d="M4 21.2h24M4 25.6h24M16 16.2v13.3" stroke="#c4562f" stroke-width="0.7" opacity="0.65"/>
+          <path d="M5 16.2L16 12.1L27 16.2L16 19Z" fill="#080605"/>
+          <path d="M5 16.2L16 12.1L27 16.2" stroke="#e36a3d" stroke-width="1.35"/>
+          <path d="M5 16.2L8.2 2.8L22.2 4.6L16 12.1Z" fill="#2a1d18" stroke="#f3c15c" stroke-width="1.35"/>
+          <ellipse cx="16" cy="16.7" rx="3.55" ry="3.15" fill="#c4562f"/>
+          <ellipse cx="16" cy="12.15" rx="2.85" ry="3.05" fill="#e36a3d"/>
+          <path d="M14.2 11.1C10.1 8.2 7.6 5.4 4.4 3.9M13.5 12.5C8.2 11.8 5.6 13.1 2.6 16.2M13.7 14.2C8.4 16.6 6.9 19.5 5.4 23.2M14.4 15.6C10.6 19.4 10 23.1 9 26.4M17.8 11.1C21.9 8.2 24.4 5.4 27.6 3.9M18.5 12.5C23.8 11.8 26.4 13.1 29.4 16.2M18.3 14.2C23.6 16.6 25.1 19.5 26.6 23.2M17.6 15.6C21.4 19.4 22 23.1 23 26.4" stroke="#f3c15c" stroke-width="1.2" stroke-linecap="round"/>
+          <circle cx="14.95" cy="11.25" r="0.72" fill="#f3c15c"/>
+          <circle cx="17.05" cy="11.25" r="0.72" fill="#f3c15c"/>
         </svg>
       </div>
       <div>
@@ -231,7 +242,9 @@
         <p>Static JavaScript and PHP deobfuscator</p>
       </div>
     </div>
-    <div class="pill">Not executed</div>
+    <div class="pills">
+      <div class="pill" title="The web UI never runs JavaScript or PHP. Decode rewrites encodings and the syntax tree in-process. Isolated PHP execution is CLI-only: evilbox --sandbox observe">Not executed</div>
+    </div>
   </header>
   <main>
     <section class="card" aria-labelledby="input-title">
@@ -254,9 +267,10 @@
         </div>
         <div class="examples" id="examples"></div>
         <p class="note">
-          Unwraps encodings and rewrites the syntax tree in-process. No JS engine, no PHP engine,
-          and the Docker sandbox is not available here. Submissions are kept in memory for this
-          request only.
+          <strong>Not executed</strong> means this page never runs the sample. There is no JS engine
+          and no PHP engine over HTTP — only static unwraps and AST rewrites, in memory for this request.
+          To actually run PHP in an isolated Docker lab, use the CLI:
+          <code>evilbox sample.php --sandbox observe</code>. JavaScript stays static even there.
         </p>
       </div>
     </section>

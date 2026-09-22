@@ -91,7 +91,7 @@ curl --data-binary @packed.php -H 'Content-Type: text/plain' \
   'http://127.0.0.1:8080/api/decode?lang=php&filename=packed.php'
 ```
 
-The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). Each decode runs in a **subprocess** with CPU/address rlimits; a hang is killed with SIGKILL (a worker thread cannot interrupt a catastrophic regex). The UI is same-origin: there is no `Access-Control-Allow-Origin: *`.
+The web path is **static only**: samples stay in memory for that request, are not written to disk, and are not executed. The header badge **Not executed** is that guarantee, not a failed run. The PHP Docker sandbox (`--sandbox dump|observe`) stays CLI-only. Default limits are 2 MiB and 20 seconds (`EVILBOX_WEB_MAX_BYTES`, `EVILBOX_WEB_TIMEOUT`). Each decode runs in a **subprocess** with CPU/address rlimits; a hang is killed with SIGKILL (a worker thread cannot interrupt a catastrophic regex). The UI is same-origin: there is no `Access-Control-Allow-Origin: *`.
 
 The no-argument menu also has **Open the web decoder**.
 

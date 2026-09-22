@@ -85,6 +85,9 @@ def test_index_page(web_url):
     assert "/api/decode" in text
     assert "Campaign keys" in text
     assert "ATT&CK" in text
+    assert "Not executed" in text
+    assert "spider climbing out" in text
+    assert "evilbox sample.php --sandbox observe" in text
     assert "text/html" in headers.get("Content-Type", "")
 
 
