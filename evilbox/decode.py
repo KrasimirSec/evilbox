@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+import hashlib
 import html
 import quopri
 import re
@@ -148,6 +149,129 @@ def gzip_zlib_or_inflate(data: bytes) -> bytes | None:
         if out is not None:
             return out
     return _decompress_limited(data, 32 + zlib.MAX_WBITS)
+
+
+# Common cookie/POST passwords used by PAS-family PHP webshells.
+PAS_COMMON_KEYS: tuple[str, ...] = (
+    "root",
+    "admin",
+    "1",
+    "12",
+    "123",
+    "1234",
+    "12345",
+    "123456",
+    "12345678",
+    "password",
+    "pass",
+    "passwd",
+    "pwd",
+    "qwerty",
+    "abc123",
+    "admin123",
+    "letmein",
+    "secret",
+    "shell",
+    "cmd",
+    "ok",
+    "p@ssw0rd",
+    "predator",
+    "wso",
+    "c99",
+    "r57",
+    "b374k",
+    "pas",
+    "php",
+    "test",
+    "default",
+    "changeme",
+    "111111",
+    "000000",
+    "666666",
+    "888888",
+    "password1",
+    "pass123",
+    "root123",
+    "toor",
+    "god",
+    "love",
+    "china",
+    "india",
+    "xxx",
+    "hack",
+    "hacker",
+    "webshell",
+    "backdoor",
+)
+
+
+def pas_key_schedule(password: bytes) -> bytes:
+    """md5(pw) + substr(md5(strrev(pw)), 0, strlen(pw)) as used by PAS shells."""
+    forward = hashlib.md5(password).hexdigest().encode("ascii")
+    reverse = hashlib.md5(password[::-1]).hexdigest().encode("ascii")
+    return forward + reverse[: len(password)]
+
+
+def pas_autokey_decrypt(data: bytes, password: str | bytes) -> bytes | None:
+    """Subtractive autokey: out[i]=(ct[i]-key[i])%256; key.=out[i]."""
+    if not data:
+        return None
+    pw = password.encode("latin-1") if isinstance(password, str) else password
+    key = bytearray(pas_key_schedule(pw))
+    if not key:
+        return None
+    out = bytearray(len(data))
+    for i, cipher in enumerate(data):
+        if i >= len(key):
+            return None
+        plain = (cipher - key[i]) % 256
+        out[i] = plain
+        key.append(plain)
+    return bytes(out)
+
+
+def looks_like_php_payload(data: bytes) -> bool:
+    if len(data) < 48:
+        return False
+    text = data.decode("latin-1", "replace")
+    stripped = text.lstrip()
+    if stripped.startswith(("<?", "@ini_set", "@error", "@set_time", "@ignore_user", "goto ", "eval(", "$")):
+        if len(data) >= 64 or "$_" in text or "function" in text or "@ini_set" in text:
+            return True
+    markers = (
+        "<?php",
+        "<?=",
+        "$_GET",
+        "$_POST",
+        "$_COOKIE",
+        "$_REQUEST",
+        "function ",
+        "@ini_set",
+        "eval(",
+        "create_function",
+        "base64_decode",
+        "gzinflate",
+    )
+    return sum(1 for marker in markers if marker in text) >= 2
+
+
+def pas_recover_payload(data: bytes, extra_keys: list[str] | None = None) -> tuple[bytes, str] | None:
+    """Try extra keys then the common PAS password list; keep the longest PHP-like inflate."""
+    seen: set[str] = set()
+    best: tuple[bytes, str] | None = None
+    for raw in list(extra_keys or []) + list(PAS_COMMON_KEYS):
+        if raw in seen:
+            continue
+        seen.add(raw)
+        decrypted = pas_autokey_decrypt(data, raw)
+        if decrypted is None:
+            continue
+        inflated = gzip_zlib_or_inflate(decrypted)
+        if inflated is None or not looks_like_php_payload(inflated):
+            continue
+        if best is None or len(inflated) > len(best[0]):
+            best = (inflated, raw)
+    return best
 
 
 def bytes_to_text(data: bytes) -> str | None:

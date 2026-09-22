@@ -134,7 +134,7 @@ def deobfuscate(
     parse_ok = not has_error(tree.root_node)
     if not parse_ok:
         warnings.append("Parse still reports errors after deobfuscation.")
-    if any("recovered" in w for w in warnings):
+    if any("convert_uudecode used line padding" in w for w in warnings):
         layers[-1].unresolved.append(
             UnresolvedFold(
                 layer=layers[-1].name,

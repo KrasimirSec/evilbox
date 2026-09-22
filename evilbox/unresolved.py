@@ -150,6 +150,12 @@ def _scan_php(source: str, layer: str) -> list[UnresolvedFold]:
         if key not in PHP_DECODERS and key not in PHP_DISPATCH and name[:1] != "$":
             continue
         snippet = _snippet(source, node.start_byte, node.end_byte)
+        if key == "pack" and not re.search(r"pack\s*\(\s*['\"][hH]", snippet):
+            continue
+        if key in {"str_rot13", "stripslashes", "urldecode", "rawurldecode", "strrev"} and re.search(
+            r"\$_|\$[A-Za-z_]", snippet
+        ):
+            continue
         if key in PHP_DECODERS:
             kind = "decoder"
             reason = "decoder call did not fold to a constant"

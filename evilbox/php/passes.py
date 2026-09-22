@@ -103,7 +103,7 @@ class FoldEnv:
 
     def record(self, node, name: str, value: Value | None, unsound: bool) -> None:
         key = self.key(node, name)
-        self.history.setdefault(key, []).append((node.start_byte, value, unsound))
+        self.history.setdefault(key, []).append((node.end_byte, value, unsound))
 
     def reaching(self, node, name: str) -> Value | None:
         key = self.key(node, name)
