@@ -107,6 +107,29 @@ def test_cli_help_mentions_serve(capsys):
     assert "sandbox is not exposed" in out
 
 
+def test_cli_sandbox_docker_missing(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "sample.php"
+    src.write_text("<?php echo 1;", encoding="utf-8")
+    monkeypatch.setattr("evilbox.sandbox.shutil.which", lambda _: None)
+    assert main([str(src), "--sandbox", "observe"]) == 2
+    err = capsys.readouterr().err
+    assert "docker is not installed" in err
+    assert "omit --sandbox" in err
+    assert "Traceback" not in err
+
+
+def test_cli_sandbox_help_mentions_first_build(capsys):
+    try:
+        main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("expected --help to exit")
+    out = capsys.readouterr().out
+    assert "several minutes" in out
+    assert "Docker" in out or "docker" in out
+
+
 def test_cli_missing_file(tmp_path, capsys):
     missing = tmp_path / "nope.js"
     assert main([str(missing)]) == 2

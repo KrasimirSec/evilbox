@@ -198,7 +198,11 @@ Not included: running a JavaScript or PHP engine over HTTP. The optional Docker 
 
 ## PHP sandbox (evalhook, no real internet)
 
-Optional Docker lab for packed PHP. Each run **builds a throwaway image tag, starts a new container with `--network none`, `--read-only`, `--cap-drop ALL` plus the setup caps (`NET_ADMIN`, `NET_RAW`, `NET_BIND_SERVICE`, …), `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`**. Docker’s default seccomp profile stays enabled. If a `runsc` (gVisor) runtime is installed it is used. The sample is bind-mounted read-only. **Logs are not bind-mounted.** After the process exits, the host copies `/logs` with `docker cp` and **rejects symlinks** before reading or writing `domains.txt` / `deobfuscated.php`. The PHP sample runs as uid 65534 with capabilities dropped; dnsmasq, tcpdump, and the HTTP sink start first as root. Nothing from the run is committed back into an image.
+Optional Docker lab for packed PHP. Requires a **running Docker daemon**. The first run **builds** `evilbox-php-sandbox:<php>-<hash>` (pulls the PHP base image, compiles evalhook). That often takes several minutes; Evilbox prints `evilbox: …` status lines and streams `docker build --progress=plain` to stderr so it does not look hung. Later runs **reuse that image** and only start a container. The sample is never baked into the image.
+
+Each run **starts a new container with `--network none`, `--read-only`, `--cap-drop ALL` plus the setup caps (`NET_ADMIN`, `NET_RAW`, `NET_BIND_SERVICE`, …), `--security-opt no-new-privileges`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`**. Docker’s default seccomp profile stays enabled. If a `runsc` (gVisor) runtime is installed it is used. The sample is bind-mounted read-only. **Logs are not bind-mounted.** After the process exits, the host copies `/logs` with `docker cp` and **rejects symlinks** before reading or writing `domains.txt` / `deobfuscated.php`. The PHP sample runs as uid 65534 with capabilities dropped; dnsmasq, tcpdump, and the HTTP sink start first as root. Nothing from the run is committed back into an image.
+
+If Docker is missing or the daemon is down, the CLI fails immediately and tells you to omit `--sandbox` for static decode.
 
 `--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. Observe mode defaults to **7.4** so string `assert`, `create_function`, and `preg_replace /e` still execute. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
 

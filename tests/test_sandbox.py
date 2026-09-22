@@ -1,6 +1,21 @@
+import subprocess
+import sys
 from pathlib import Path
 
-from evilbox.sandbox import docker_run_args, finalize_logs, sandbox_context_dir
+import pytest
+
+from evilbox.sandbox import (
+    SandboxError,
+    build_image,
+    cached_image_tag,
+    docker_run_args,
+    ensure_docker,
+    finalize_logs,
+    prepare_sandbox_image,
+    sandbox_context_dir,
+    sandbox_dockerfile,
+    _run_logged,
+)
 
 
 def test_sandbox_dockerfile_present():
@@ -84,3 +99,96 @@ def test_finalize_logs_rejects_symlinks(tmp_path):
     assert dumps[0].name == "eval-0001.php"
     assert not link.is_symlink()
     assert victim.read_text(encoding="utf-8") == "secret"
+
+
+def test_ensure_docker_missing(monkeypatch):
+    monkeypatch.setattr("evilbox.sandbox.shutil.which", lambda _: None)
+    with pytest.raises(SandboxError, match="docker is not installed"):
+        ensure_docker()
+
+
+def test_ensure_docker_daemon_down(monkeypatch):
+    monkeypatch.setattr("evilbox.sandbox.shutil.which", lambda _: "/usr/bin/docker")
+
+    def fake_run(cmd, *, timeout=None):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        )
+
+    monkeypatch.setattr("evilbox.sandbox._run", fake_run)
+    with pytest.raises(SandboxError, match="daemon is not running"):
+        ensure_docker()
+
+
+def test_ensure_docker_timeout(monkeypatch):
+    monkeypatch.setattr("evilbox.sandbox.shutil.which", lambda _: "/usr/bin/docker")
+
+    def hang(cmd, *, timeout=None):
+        raise subprocess.TimeoutExpired(cmd, timeout or 10)
+
+    monkeypatch.setattr("evilbox.sandbox._run", hang)
+    with pytest.raises(SandboxError, match="did not respond"):
+        ensure_docker()
+
+
+def test_cached_image_tag_is_stable():
+    context = sandbox_context_dir()
+    dockerfile = sandbox_dockerfile("7.4")
+    first = cached_image_tag(context, dockerfile, "7.4")
+    second = cached_image_tag(context, dockerfile, "7.4")
+    other = cached_image_tag(context, sandbox_dockerfile("8.3"), "8.3")
+    assert first == second
+    assert first.startswith("evilbox-php-sandbox:7.4-")
+    assert other.startswith("evilbox-php-sandbox:8.3-")
+    assert first != other
+
+
+def test_prepare_sandbox_image_reuses_cache(monkeypatch):
+    messages: list[str] = []
+    monkeypatch.setattr("evilbox.sandbox.docker_image_exists", lambda _tag: True)
+    monkeypatch.setattr(
+        "evilbox.sandbox.build_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not rebuild")),
+    )
+    monkeypatch.setattr("evilbox.sandbox._status", messages.append)
+    _context, _dockerfile, tag = prepare_sandbox_image("7.4")
+    assert tag.startswith("evilbox-php-sandbox:7.4-")
+    assert any("cached" in line for line in messages)
+
+
+def test_prepare_sandbox_image_builds_when_missing(monkeypatch):
+    built: list[str] = []
+    monkeypatch.setattr("evilbox.sandbox.docker_image_exists", lambda _tag: False)
+    monkeypatch.setattr(
+        "evilbox.sandbox.build_image",
+        lambda context, tag, dockerfile=None: built.append(tag),
+    )
+    monkeypatch.setattr("evilbox.sandbox._status", lambda _msg: None)
+    _context, _dockerfile, tag = prepare_sandbox_image("7.4")
+    assert built == [tag]
+
+
+def test_build_image_uses_plain_progress(monkeypatch):
+    seen: list[tuple[list[str], int]] = []
+
+    def fake_logged(cmd, *, timeout):
+        seen.append((cmd, timeout))
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("evilbox.sandbox._run_logged", fake_logged)
+    build_image(Path("/tmp"), "evilbox-php-sandbox:x", dockerfile=Path("/tmp/Dockerfile"))
+    cmd, timeout = seen[0]
+    assert cmd[:4] == ["docker", "build", "--progress=plain", "-t"]
+    assert timeout == 600
+
+
+def test_run_logged_streams_output(capsys):
+    proc = _run_logged(
+        [sys.executable, "-c", "import sys; print('hello-sandbox'); sys.stderr.write('from-err\\n')"],
+        timeout=10,
+    )
+    assert proc.returncode == 0
+    err = capsys.readouterr().err
+    assert "hello-sandbox" in proc.stdout
+    assert "hello-sandbox" in err
+    assert "from-err" in err
