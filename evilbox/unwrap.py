@@ -6,7 +6,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from evilbox.decode import hex_payload_to_text, unescape_js_string_body
+from evilbox.decode import (
+    b64decode,
+    bytes_to_text,
+    gzip_zlib_or_inflate,
+    hex_payload_to_text,
+    looks_like_php_source,
+    unescape_js_string_body,
+)
 
 _PACKER_HEAD = re.compile(
     r"eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,",
@@ -61,6 +68,10 @@ def unwrap_source(source: str, language: str = "js") -> tuple[str, list[str]]:
     text, notes = unwrap_dean_edwards(text)
     warnings.extend(notes)
     text, notes = unwrap_halt_compiler(text)
+    warnings.extend(notes)
+    text, notes = unwrap_quoted_eval_chain(text)
+    warnings.extend(notes)
+    text, notes = unwrap_hex_php_blob(text)
     warnings.extend(notes)
     text, notes = unwrap_percent_script(text)
     warnings.extend(notes)
@@ -238,6 +249,64 @@ def unwrap_percent_script(source: str) -> tuple[str, list[str]]:
 _HEX_STREAM_RE = re.compile(r"^(?:\\x[0-9a-fA-F]{2}|\s)+$", re.I)
 _UNICODE_STREAM_RE = re.compile(r"^(?:\\u[0-9a-fA-F]{4}|\s)+$", re.I)
 _HEX_DUMP_RE = re.compile(r"^(?:0x[0-9a-fA-F]{2}[\s,;]*){8,}$", re.I)
+_QUOTED_EVAL_RE = re.compile(
+    r"(?P<pre>print|echo)\s+(?P<q>['\"])eval\s*\(\s*"
+    r"(?P<fn>gzinflate|gzuncompress|gzdecode)\s*\(\s*base64_decode\s*\(\s*"
+    r"\\(?P=q)(?P<b64>[A-Za-z0-9+/=\s]{16,})\\(?P=q)\s*\)\s*\)\s*\)\s*;(?P=q)\s*;",
+    re.I,
+)
+_HEX_ASSIGN_RE = re.compile(r"(\$\w+)\s*=\s*'([0-9a-fA-F]{80,})'\s*;", re.I)
+_HEX_HELPER_RE = re.compile(r"hex2ascii|hex2bin|pack\s*\(\s*['\"]H\*", re.I)
+_HEX_SINK_RE = re.compile(
+    r"(?:print\s*\(\s*\$\w+\s*\)|echo\s+\$\w+|@?eval\s*\(\s*\$\w+\s*\)|@?assert\s*\(\s*\$\w+\s*\))\s*;",
+    re.I,
+)
+
+
+def unwrap_quoted_eval_chain(source: str) -> tuple[str, list[str]]:
+    """print/echo of a string that is itself eval(gzinflate(base64_decode(...)))."""
+    match = _QUOTED_EVAL_RE.search(source)
+    if not match:
+        return source, []
+    raw = b64decode(re.sub(r"\s+", "", match.group("b64")))
+    if raw is None:
+        return source, []
+    inflated = gzip_zlib_or_inflate(raw)
+    decoded = bytes_to_text(inflated if inflated is not None else raw)
+    if not decoded or not looks_like_php_source(decoded):
+        return source, []
+    return (
+        source[: match.start()] + decoded + source[match.end() :],
+        [f"Unwrapped quoted {match.group('fn')}(base64) payload."],
+    )
+
+
+def unwrap_hex_php_blob(source: str) -> tuple[str, list[str]]:
+    """$p = 'hex...'; hex2ascii($p); print/eval — common WSO/hex wrappers."""
+    best = None
+    for match in _HEX_ASSIGN_RE.finditer(source):
+        if best is None or len(match.group(2)) > len(best.group(2)):
+            best = match
+    if best is None:
+        return source, []
+    decoded = hex_payload_to_text(best.group(2), min_bytes=48)
+    if decoded is None or not looks_like_php_source(decoded):
+        return source, []
+    rest = source[best.end() :]
+    if not _HEX_HELPER_RE.search(rest[:24_000]) and not _HEX_HELPER_RE.search(
+        source[max(0, best.start() - 400) : best.start()]
+    ):
+        return source, []
+    sink = None
+    for match in _HEX_SINK_RE.finditer(rest):
+        if match.end() <= 24_000:
+            sink = match
+    if sink is None:
+        return source, []
+    return (
+        source[: best.start()] + decoded + rest[sink.end() :],
+        ["Unwrapped hex2ascii PHP blob."],
+    )
 
 
 def unwrap_hex(source: str) -> tuple[str, list[str]]:
