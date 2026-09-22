@@ -43,7 +43,7 @@ evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 | `--report PATH` | JSON report (`evilbox.report.v1`) |
 | `--html PATH` | HTML report |
 | `--max-passes N` | Unwrap/fold iterations (default: 16) |
-| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Static folds default to 8.3; `--sandbox observe` defaults to 7.4 so `assert` strings, `create_function`, and `preg_replace /e` still run |
+| `--php-version 5.6\|7.4\|8.3` | PHP language dialect for `substr` and the sandbox image. Default **8.3** (Debian bookworm, live mirrors). `7.4` still exists for string `assert` / `create_function` / `preg_replace /e`; that image is Debian 11 and cannot use live security |
 | `--sandbox dump\|observe` | Isolated PHP Docker lab (JS files stay on the static path) |
 | `--sandbox-profile default\|googlebot\|google-referrer\|wp-cookie` | Request shape inside the sandbox |
 | `--keep-name` | Mount the sample under its original filename inside the sandbox |
@@ -206,7 +206,7 @@ Each run **starts a new container with `--network none`, `--read-only`, `--cap-d
 
 If Docker is missing or the daemon is down, the CLI fails immediately and tells you to omit `--sandbox` for static decode.
 
-`--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. Observe mode defaults to **7.4** so string `assert`, `create_function`, and `preg_replace /e` still execute. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
+`--php-version 8.3`, `7.4`, or `5.6` selects the Dockerfile. **Observe defaults to 8.3** (bookworm still has working `deb.debian.org` packages on amd64 and arm64). Pass `--php-version 7.4` only if you need string `assert`, `create_function`, or `preg_replace /e`. 8.3 and 7.4 compile evalhook; 5.6 cannot (no `zend_string`) and is observe/stub-only.
 
 `--sandbox-profile` sets the request the sample sees: `googlebot` (Googlebot UA), `google-referrer`, or `wp-cookie` (WordPress login cookies). WordPress function stubs are prepended. `sleep` / `usleep` / `nanosleep` are hooked to return immediately (LD_PRELOAD, PHP process only). `--keep-name` preserves the sample basename inside `/samples`. `--stage-file` is served by the sink instead of `OK`.
 

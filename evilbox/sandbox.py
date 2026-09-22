@@ -150,6 +150,10 @@ def docker_image_exists(tag: str) -> bool:
 def prepare_sandbox_image(php_version: str) -> tuple[Path, Path, str]:
     context = sandbox_context_dir()
     dockerfile = sandbox_dockerfile(php_version)
+    digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()[:12]
+    _status(
+        f"dockerfile {dockerfile} ({dockerfile.stat().st_size} bytes, sha256 {digest})"
+    )
     tag = cached_image_tag(context, dockerfile, php_version)
     if docker_image_exists(tag):
         _status(f"using cached sandbox image {tag}")
