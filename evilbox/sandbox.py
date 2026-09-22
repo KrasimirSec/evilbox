@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -13,6 +16,8 @@ from pathlib import Path
 from evilbox.pipeline import deobfuscate
 
 IMAGE_NAME = "evilbox-php-sandbox"
+DOCKER_INFO_TIMEOUT = 10
+DOCKER_BUILD_TIMEOUT = 600
 QUERY_RE = re.compile(r"query\[[^\]]+\]\s+(\S+)", re.I)
 PHP_IMAGES = {
     "8.3": IMAGE_NAME,
@@ -49,16 +54,130 @@ class SandboxResult:
     tcp: list[dict] | None = None
 
 
+def _status(message: str) -> None:
+    print(f"evilbox: {message}", file=sys.stderr, flush=True)
+
+
 def _run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
 
 
+def _run_logged(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run a command, echoing its output live so long jobs are not silent."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+
+    def _pump() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            chunks.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
+        reader.join(timeout=5)
+        raise subprocess.TimeoutExpired(cmd, timeout, output="".join(chunks)) from exc
+    reader.join(timeout=5)
+    return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout="".join(chunks), stderr="")
+
+
+def ensure_docker(*, timeout: int = DOCKER_INFO_TIMEOUT) -> None:
+    if shutil.which("docker") is None:
+        raise SandboxError(
+            "docker is not installed or not on PATH. "
+            "The PHP sandbox needs a running Docker daemon. "
+            "Omit --sandbox to decode statically without executing the sample."
+        )
+    try:
+        proc = _run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise SandboxError(
+            f"docker did not respond within {timeout}s (is the daemon starting?). "
+            "Start Docker Desktop / dockerd and retry, or omit --sandbox for static decode."
+        ) from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "daemon not reachable").strip().splitlines()
+        hint = detail[-1] if detail else "daemon not reachable"
+        raise SandboxError(
+            f"docker is installed but the daemon is not running ({hint}). "
+            "Start Docker and retry, or omit --sandbox for static decode."
+        )
+
+
+def context_digest(context: Path, dockerfile: Path) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(dockerfile.name.encode("utf-8"))
+    hasher.update(b"\0")
+    hasher.update(dockerfile.read_bytes())
+    for path in sorted(context.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix == ".pyc" or path.name in {".DS_Store", "Thumbs.db"}:
+            continue
+        rel = path.relative_to(context).as_posix().encode("utf-8")
+        hasher.update(rel)
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def cached_image_tag(context: Path, dockerfile: Path, php_version: str) -> str:
+    ver = re.sub(r"[^0-9.]+", "", php_version) or "php"
+    return f"{IMAGE_NAME}:{ver}-{context_digest(context, dockerfile)}"
+
+
+def docker_image_exists(tag: str) -> bool:
+    proc = _run(["docker", "image", "inspect", "--format", "{{.Id}}", tag], timeout=DOCKER_INFO_TIMEOUT)
+    return proc.returncode == 0
+
+
+def prepare_sandbox_image(php_version: str) -> tuple[Path, Path, str]:
+    context = sandbox_context_dir()
+    dockerfile = sandbox_dockerfile(php_version)
+    digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()[:12]
+    _status(
+        f"dockerfile {dockerfile} ({dockerfile.stat().st_size} bytes, sha256 {digest})"
+    )
+    tag = cached_image_tag(context, dockerfile, php_version)
+    if docker_image_exists(tag):
+        _status(f"using cached sandbox image {tag}")
+        return context, dockerfile, tag
+    _status(
+        f"building sandbox image {tag} (PHP {php_version}; "
+        "first run pulls the PHP base image and compiles evalhook — often several minutes)"
+    )
+    build_image(context, tag, dockerfile=dockerfile)
+    return context, dockerfile, tag
+
+
 def build_image(context: Path, tag: str, *, dockerfile: Path | None = None) -> None:
-    cmd = ["docker", "build", "-t", tag]
+    cmd = ["docker", "build", "--progress=plain", "-t", tag]
     if dockerfile is not None:
         cmd.extend(["-f", str(dockerfile)])
     cmd.append(str(context))
-    proc = _run(cmd, timeout=600)
+    try:
+        proc = _run_logged(cmd, timeout=DOCKER_BUILD_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SandboxError(
+            f"docker build timed out after {DOCKER_BUILD_TIMEOUT}s. "
+            "Check network access to pull the PHP image, or omit --sandbox for static decode."
+        ) from exc
     if proc.returncode != 0:
         raise SandboxError(
             "docker build failed:\n" + (proc.stderr or proc.stdout or "no output")
@@ -80,10 +199,42 @@ def sandbox_dockerfile(php_version: str = "8.3") -> Path:
 
 
 def docker_has_runtime(name: str) -> bool:
-    proc = _run(["docker", "info", "--format", "{{json .Runtimes}}"], timeout=20)
+    proc = _run(["docker", "info", "--format", "{{json .Runtimes}}"], timeout=DOCKER_INFO_TIMEOUT)
     if proc.returncode != 0:
         return False
     return name in (proc.stdout or "")
+
+
+def docker_mount_root() -> Path:
+    return Path.home() / ".cache" / "evilbox" / "docker-mounts"
+
+
+def restricted_file_sharing() -> bool:
+    """Docker Desktop (macOS) and snap Docker only share the home directory by default."""
+    if sys.platform == "darwin":
+        return True
+    docker_bin = shutil.which("docker") or ""
+    return "/snap/" in docker_bin
+
+
+def docker_supports_memory_swap() -> bool:
+    # Docker Desktop's Linux VM often rejects --memory-swap even when --memory works.
+    return sys.platform != "darwin"
+
+
+def stage_bind_source(src: Path, *, run_id: str, name: str) -> Path:
+    src = src.resolve()
+    if not restricted_file_sharing():
+        return src
+    dest_dir = docker_mount_root() / run_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    shutil.copy2(src, dest)
+    return dest
+
+
+def cleanup_bind_stage(run_id: str) -> None:
+    shutil.rmtree(docker_mount_root() / run_id, ignore_errors=True)
 
 
 def docker_run_args(
@@ -99,14 +250,18 @@ def docker_run_args(
     keep_name: bool = False,
     stage_file: Path | None = None,
     gvisor: bool = False,
+    memory_swap: bool | None = None,
 ) -> list[str]:
     del log_dir  # logs are copied out after the run; never bind-mounted
     if profile not in SANDBOX_PROFILES:
         profile = "default"
+    if memory_swap is None:
+        memory_swap = docker_supports_memory_swap()
     sample_name = sample.name if keep_name else "sample.php"
     if "/" in sample_name or sample_name in {".", ".."} or not sample_name:
         sample_name = "sample.php"
     dst = f"/samples/{sample_name}"
+    sample_src = sample.resolve()
     args = [
         "docker",
         "run",
@@ -117,8 +272,11 @@ def docker_run_args(
         "--read-only",
         "--memory",
         "512m",
-        "--memory-swap",
-        "512m",
+    ]
+    if memory_swap:
+        args.extend(["--memory-swap", "512m"])
+    args.extend(
+        [
         "--cpus",
         "1",
         "--pids-limit",
@@ -154,14 +312,15 @@ def docker_run_args(
         "--env",
         f"SANDBOX_SAMPLE={dst}",
         "--mount",
-        f"type=bind,src={sample},dst={dst},readonly=true",
+        f"type=bind,src={sample_src},dst={dst},readonly=true",
         "--mount",
         "type=tmpfs,destination=/logs,tmpfs-mode=1777",
         "--mount",
         "type=tmpfs,destination=/tmp,tmpfs-mode=1777",
         "--mount",
         "type=tmpfs,destination=/run,tmpfs-mode=1777",
-    ]
+        ]
+    )
     if stage_file is not None:
         args.extend(
             [
@@ -321,10 +480,9 @@ def run_php_sandbox(
     keep_name: bool = False,
     stage_file: Path | None = None,
 ) -> SandboxResult:
-    if shutil.which("docker") is None:
-        raise SandboxError("docker is not installed or not on PATH.")
     if mode not in {"dump", "observe"}:
         raise SandboxError("mode must be dump or observe")
+    ensure_docker()
 
     sample = sample.resolve()
     if not sample.is_file():
@@ -336,42 +494,53 @@ def run_php_sandbox(
         if not stage_file.is_file() or stage_file.is_symlink():
             raise SandboxError(f"stage file not found or is a symlink: {stage_file}")
 
-    context = sandbox_context_dir()
-    dockerfile = sandbox_dockerfile(php_version)
+    _status(f"preparing PHP {php_version} sandbox ({mode})")
+    _context, _dockerfile, tag = prepare_sandbox_image(php_version)
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
-    tag = f"{IMAGE_NAME}:{run_id}"
     container_name = f"evilbox-{run_id}"
     log_dir = (logs_root / run_id).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    build_image(context, tag, dockerfile=dockerfile)
+    mount_name = sample.name if keep_name else "sample.php"
+    if "/" in mount_name or mount_name in {".", ".."} or not mount_name:
+        mount_name = "sample.php"
+    mount_sample = stage_bind_source(sample, run_id=run_id, name=mount_name)
+    mount_stage = (
+        stage_bind_source(stage_file, run_id=run_id, name="stage.bin") if stage_file is not None else None
+    )
     args = docker_run_args(
         tag=tag,
-        sample=sample,
+        sample=mount_sample,
         mode=mode,
         timeout=timeout,
         container_name=container_name,
         profile=profile,
         php_version=php_version,
-        keep_name=keep_name,
-        stage_file=stage_file,
+        keep_name=True,
+        stage_file=mount_stage,
         gvisor=docker_has_runtime("runsc"),
     )
     host_timeout = timeout + 90
+    _status(
+        f"running {sample.name} in an isolated container "
+        f"(PHP limited to {timeout}s; host waits up to {host_timeout}s)"
+    )
     proc: subprocess.CompletedProcess[str] | None = None
     timed_out = False
     try:
-        proc = _run(args, timeout=host_timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _run(["docker", "kill", container_name], timeout=30)
-    try:
-        _copy_container_logs(container_name, log_dir)
+        try:
+            proc = _run(args, timeout=host_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _status("container exceeded host timeout; killing it")
+            _run(["docker", "kill", container_name], timeout=30)
+        try:
+            _status("copying /logs out of the container")
+            _copy_container_logs(container_name, log_dir)
+        finally:
+            _run(["docker", "rm", "-f", container_name], timeout=30)
     finally:
-        _run(["docker", "rm", "-f", container_name], timeout=30)
-        rmi = _run(["docker", "rmi", "-f", tag], timeout=60)
-        if rmi.returncode != 0:
-            (log_dir / "docker.rmi.err").write_text(rmi.stderr or "", encoding="utf-8")
+        cleanup_bind_stage(run_id)
 
     if proc is not None:
         (log_dir / "docker.stdout.log").write_text(proc.stdout or "", encoding="utf-8")
@@ -415,6 +584,7 @@ def run_php_sandbox(
     _safe_write_text(log_dir / "cross-check.json", json.dumps(cross, indent=2) + "\n", log_dir)
     if timed_out:
         raise SandboxError(f"sandbox timed out after {host_timeout}s; logs kept at {log_dir}")
+    _status(f"sandbox finished (docker status {status}); logs at {log_dir}")
     return SandboxResult(
         log_dir=log_dir,
         domains=domains,

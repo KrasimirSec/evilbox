@@ -115,7 +115,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--php-version",
         default=None,
-        help="PHP language version for folds and sandbox image (5.6, 7.4, 8.3). Default: 8.3 static, 7.4 for sandbox observe",
+        help="PHP language version for folds and sandbox image (5.6, 7.4, 8.3). Default: 8.3",
     )
     parser.add_argument(
         "--sandbox-profile",
@@ -126,7 +126,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sandbox",
         choices=("dump", "observe"),
-        help="Run the sample in an isolated Docker lab. PHP uses evalhook. JavaScript is deobfuscated statically (no PHP sandbox).",
+        help="Run the sample in an isolated Docker lab (needs a running daemon). First run builds the PHP image and can take several minutes with live logs on stderr. JavaScript stays on the static path.",
     )
     parser.add_argument(
         "--logs-dir",
@@ -162,7 +162,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     php_version = args.php_version
     if php_version is None:
-        php_version = "7.4" if args.sandbox == "observe" else "8.3"
+        php_version = "8.3"
     args.php_version = php_version
 
     if args.input != "-" and Path(args.input).is_dir():

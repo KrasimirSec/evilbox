@@ -1,4 +1,5 @@
 from evilbox.cli import main
+from evilbox.sandbox import SandboxError
 
 
 def test_cli_js_stdout(tmp_path, capsys):
@@ -105,6 +106,59 @@ def test_cli_help_mentions_serve(capsys):
     out = capsys.readouterr().out
     assert "web UI" in out or "web" in out.lower()
     assert "sandbox is not exposed" in out
+
+
+def test_cli_sandbox_observe_defaults_to_php83(tmp_path, monkeypatch, capsys):
+    seen: dict = {}
+
+    def fake_run(sample, **kwargs):
+        seen.update(kwargs)
+        raise SandboxError("stop-after-version")
+
+    monkeypatch.setattr("evilbox.cli.run_php_sandbox", fake_run)
+    src = tmp_path / "sample.php"
+    src.write_text("<?php echo 1;", encoding="utf-8")
+    assert main([str(src), "--sandbox", "observe"]) == 2
+    assert seen.get("php_version") == "8.3"
+    assert "stop-after-version" in capsys.readouterr().err
+
+
+def test_cli_sandbox_php_version_74_is_opt_in(tmp_path, monkeypatch, capsys):
+    seen: dict = {}
+
+    def fake_run(sample, **kwargs):
+        seen.update(kwargs)
+        raise SandboxError("stop-after-version")
+
+    monkeypatch.setattr("evilbox.cli.run_php_sandbox", fake_run)
+    src = tmp_path / "sample.php"
+    src.write_text("<?php echo 1;", encoding="utf-8")
+    assert main([str(src), "--sandbox", "observe", "--php-version", "7.4"]) == 2
+    assert seen.get("php_version") == "7.4"
+    assert "stop-after-version" in capsys.readouterr().err
+
+
+def test_cli_sandbox_docker_missing(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "sample.php"
+    src.write_text("<?php echo 1;", encoding="utf-8")
+    monkeypatch.setattr("evilbox.sandbox.shutil.which", lambda _: None)
+    assert main([str(src), "--sandbox", "observe"]) == 2
+    err = capsys.readouterr().err
+    assert "docker is not installed" in err
+    assert "omit --sandbox" in err.lower()
+    assert "Traceback" not in err
+
+
+def test_cli_sandbox_help_mentions_first_build(capsys):
+    try:
+        main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("expected --help to exit")
+    out = capsys.readouterr().out
+    assert "several minutes" in out
+    assert "Docker" in out or "docker" in out
 
 
 def test_cli_missing_file(tmp_path, capsys):

@@ -1,7 +1,22 @@
-# PHP 7.4.33 CLI. Tag is frozen upstream (EOL). evalhook is compiled with the PHP 7 compile_string ABI.
+# PHP 7.4.33 CLI. Frozen upstream tag; evalhook uses the PHP 7 compile_string ABI.
+# Multi-arch (linux/amd64 + linux/arm64) so Docker Desktop on Apple Silicon is native.
 FROM php:7.4-cli-bullseye
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Debian 11 LTS is over. Live deb.debian.org/debian-security still advertises
+# packages (InRelease + Packages) then 404s the .debs. archive.debian.org has
+# bullseye main for amd64 and arm64, but has no bullseye-security suite — so
+# we replace sources with archive main only (no security repo).
+RUN set -eux; \
+    printf '%s\n' \
+      'deb http://archive.debian.org/debian bullseye main' \
+      > /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d; \
+    printf '%s\n' \
+      'Acquire::Check-Valid-Until "false";' \
+      'Acquire::Retries "5";' \
+      > /etc/apt/apt.conf.d/99archive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
         $PHPIZE_DEPS \
         ca-certificates \
         dnsmasq \
@@ -15,9 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
         iptables \
         util-linux \
-        zlib1g-dev \
-    && docker-php-ext-install curl zip \
-    && rm -rf /var/lib/apt/lists/*
+        zlib1g-dev; \
+    docker-php-ext-install curl zip; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY vendor/php-eval-hook /usr/src/php-eval-hook
 RUN cd /usr/src/php-eval-hook \
