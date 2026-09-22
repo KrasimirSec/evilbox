@@ -127,10 +127,11 @@ JSON schema id: `evilbox.report.v1`. Fields include:
 - **encoded_not_analyzable** — ionCube, Zend Guard, or SourceGuardian headers (`encoded, not analyzable`)
 - **failed_folds** — true when the inner layer still has decoder/packer leftovers
 - **roles** / **capabilities** — with evidence snippets
-- **indicators** — URLs, domains, IPs, emails, files, paths, registry, APIs
-- **indicators_by_layer** — the same IOCs tagged with the layer they appeared in
+- **indicators** — campaign-oriented IOCs from every layer (and sandbox DNS/HTTP/TCP when used): URLs, domains, IPv4/IPv6, `host:port` endpoints, `.onion`, emails, URL paths, query keys, PHP `$_GET`/`$_POST`/`$_COOKIE`/`$_REQUEST` parameter names, HTTP methods, user-agents, paste sites, Telegram bots, Discord/Slack webhooks, BTC/ETH/XMR wallets, cloud tokens (AWS/GitHub/Google/Slack/Stripe), JWTs, PEM private-key markers, assigned crypto keys, MD5/SHA1/SHA256 literals, UUIDs, CVEs, mutexes, named pipes, files, Windows/UNC and Unix paths, registry keys, PDB paths, cookies, cron lines, stratum miners, and distinctive APIs
+- **indicators_by_layer** — the same IOCs tagged with the layer they appeared in (`sandbox` for observed traffic)
+- **correlation** — ATT&CK technique tags derived from capabilities/roles, typed `campaign_keys` (`domain:…`, `wallet:btc:…`, `mutex:…`, …) for joining samples, plus grouped pivots (network / identities / secrets / artifacts / behaviors) and cluster hashes
 - **surface_signatures** — full YARA rule plus PCRE needles from the **original** file only
-- **sandbox** — present when `--sandbox` was used (log dir, DNS hosts, HTTP, eval dump names, php version, request profile)
+- **sandbox** — present when `--sandbox` was used (log dir, DNS hosts, HTTP/TCP, eval dump names, php version, request profile). Observed traffic is merged into `indicators` and tagged as layer `sandbox`
 - **sandbox_cross_check** — static inner layer vs sandbox eval-dump layer; disagreements are flagged
 
 `--html` is the same data as a simple HTML page.

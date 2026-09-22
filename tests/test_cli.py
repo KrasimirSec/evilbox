@@ -27,6 +27,9 @@ def test_cli_report_json(tmp_path, capsys):
     assert "evilbox.report.v1" in data
     assert "webshell" in data
     assert "surface_signatures" in data
+    assert "correlation" in data
+    assert "campaign_keys" in data
+    assert "T1505.003" in data
     err = capsys.readouterr().err
     assert "roles:" in err
     assert "surface signatures" in err
