@@ -6,7 +6,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from evilbox.decode import hex_payload_to_text, unescape_js_string_body
+from evilbox.decode import (
+    b64decode,
+    hex_payload_to_text,
+    pas_recover_payload,
+    unescape_js_string_body,
+)
 
 _PACKER_HEAD = re.compile(
     r"eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,",
@@ -61,6 +66,8 @@ def unwrap_source(source: str, language: str = "js") -> tuple[str, list[str]]:
     text, notes = unwrap_dean_edwards(text)
     warnings.extend(notes)
     text, notes = unwrap_halt_compiler(text)
+    warnings.extend(notes)
+    text, notes = unwrap_pas_keyed(text)
     warnings.extend(notes)
     text, notes = unwrap_percent_script(text)
     warnings.extend(notes)
@@ -626,6 +633,133 @@ def _jjdecode(source: str) -> str | None:
 
 
 _HALT_RE = re.compile(r"__halt_compiler\s*\(\s*\)\s*;", re.I)
+
+_PAS_KEY_RE = re.compile(
+    r"md5\s*\(\s*(\$\w+)\s*\)\s*\.\s*substr\s*\(\s*md5\s*\(\s*strrev\s*\(\s*\1\s*\)",
+    re.I | re.S,
+)
+_PAS_LOOP_RE = re.compile(
+    r"chr\s*\(\s*\(\s*ord\s*\(\s*\$\w+\s*\[\s*\$\w+\s*\]\s*\)\s*-\s*ord\s*\(\s*\$\w+\s*\[\s*\$\w+\s*\]\s*\)\s*\)\s*%\s*256\s*\)",
+    re.I | re.S,
+)
+_PAS_INFLATE_RE = re.compile(r"@?gzinflate\s*\(\s*\$\w+\s*\)", re.I)
+_PAS_CREATE_RE = re.compile(r"create_function\s*\(", re.I)
+_PAS_FOR_N = re.compile(r"for\s*\(\s*\$\w+\s*=\s*0\s*;\s*\$\w+\s*<\s*(\d+)\s*;", re.I)
+_PAS_SUPER = re.compile(r"\$_(COOKIE|POST|GET|REQUEST)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]", re.I)
+_PAS_IF_ISSET = re.compile(r"if\s*\(\s*isset\s*\(\s*\$_(?:COOKIE|POST|GET|REQUEST)\s*\[", re.I)
+_PAS_STR_REPLACE_BLOB = re.compile(
+    r"str_replace\s*\(\s*['\"]\\n['\"]\s*,\s*['\"]['\"]\s*,\s*'([^']+)'\s*\)",
+    re.S,
+)
+_PAS_B64_BLOB = re.compile(r"'([A-Za-z0-9+/=\n\r]{80,})'", re.S)
+
+
+def _skip_php_string(source: str, i: int) -> int:
+    quote = source[i]
+    i += 1
+    while i < len(source):
+        ch = source[i]
+        if quote == "'" and ch == "\\" and i + 1 < len(source) and source[i + 1] in "\\'":
+            i += 2
+            continue
+        if quote == "'" and ch == "'":
+            return i + 1
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if quote == '"' and ch == '"':
+            return i + 1
+        i += 1
+    return i
+
+
+def _match_brace(source: str, open_idx: int) -> int | None:
+    depth = 0
+    i = open_idx
+    while i < len(source):
+        ch = source[i]
+        if ch in "'\"":
+            i = _skip_php_string(source, i)
+            continue
+        if ch == "/" and i + 1 < len(source) and source[i + 1] == "/":
+            nl = source.find("\n", i)
+            i = len(source) if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < len(source) and source[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            i = len(source) if end < 0 else end + 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _pas_ciphertext(source: str) -> bytes | None:
+    match = _PAS_STR_REPLACE_BLOB.search(source)
+    blob = match.group(1) if match else None
+    if blob is None:
+        blobs = _PAS_B64_BLOB.findall(source)
+        blob = max(blobs, key=len) if blobs else None
+    if not blob:
+        return None
+    return b64decode(blob.replace("\n", "").replace("\r", ""))
+
+
+def unwrap_pas_keyed(source: str) -> tuple[str, list[str]]:
+    """PAS webshell: cookie/POST password → autokey subtract → gzinflate → create_function."""
+    key_hit = _PAS_KEY_RE.search(source)
+    if key_hit is None or _PAS_LOOP_RE.search(source) is None:
+        return source, []
+    if _PAS_INFLATE_RE.search(source) is None or _PAS_CREATE_RE.search(source) is None:
+        return source, []
+    ciphertext = _pas_ciphertext(source)
+    if not ciphertext:
+        return source, ["Detected PAS cookie-keyed gzinflate; ciphertext could not be recovered."]
+    bound = _PAS_FOR_N.search(source)
+    if bound:
+        size = int(bound.group(1))
+        if 16 <= size <= len(ciphertext):
+            ciphertext = ciphertext[:size]
+    extra = [item.group(2) for item in _PAS_SUPER.finditer(source)]
+    recovered = pas_recover_payload(ciphertext, extra_keys=extra)
+    if recovered is None:
+        return source, ["Detected PAS cookie-keyed gzinflate; password was not among common keys."]
+    payload, password = recovered
+    inner = payload.decode("latin-1")
+    spliced = _pas_splice(source, inner, key_at=key_hit.start())
+    return spliced, [f"Unwrapped PAS autokey+gzinflate (key {password!r})."]
+
+
+def _pas_splice(source: str, inner: str, *, key_at: int) -> str:
+    if_hits = list(_PAS_IF_ISSET.finditer(source))
+    if_match = None
+    for hit in if_hits:
+        if hit.start() <= key_at:
+            if_match = hit
+    if if_match is None and if_hits:
+        if_match = if_hits[0]
+    prefix = source[: if_match.start()] if if_match is not None else ""
+    suffix = ""
+    if if_match is not None:
+        brace = source.find("{", if_match.start())
+        end = _match_brace(source, brace) if brace >= 0 else None
+        if end is not None:
+            suffix = source[end + 1 :]
+    head_match = re.match(r"\s*<\?php\b", prefix, re.I)
+    head = "<?php\n" if head_match or source.lstrip().startswith("<?") else ""
+    loader = prefix[head_match.end() :] if head_match else prefix
+    keep_loader = bool(re.search(r"\b(?:function|class|namespace)\b", loader, re.I))
+    if keep_loader:
+        head = prefix.rstrip() + "\n"
+    body = inner if inner.startswith("\n") else "\n" + inner
+    if not body.endswith("\n") and suffix.strip():
+        body += "\n"
+    return head + body + suffix
 
 
 def unwrap_halt_compiler(source: str) -> tuple[str, list[str]]:
