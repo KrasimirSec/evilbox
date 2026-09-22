@@ -35,9 +35,11 @@ def test_sandbox_dockerfile_present():
     assert "@sha256:" in text
     assert (context / "debian-archive.sh").is_file()
     archive_sh = (context / "debian-archive.sh").read_text(encoding="utf-8")
-    assert "archive.debian.org" in archive_sh
+    assert "archive.debian.org/debian" in archive_sh
+    assert "debian-security" not in archive_sh
     dockerfile_74 = (context / "Dockerfile.7.4").read_text(encoding="utf-8")
-    assert "debian-archive.sh" in dockerfile_74
+    assert "deb http://archive.debian.org/debian bullseye main" in dockerfile_74
+    assert "deb http://archive.debian.org/debian-security" not in dockerfile_74
     assert "php:7.4-cli-bullseye" in dockerfile_74
     dockerfile_56 = (context / "Dockerfile.5.6").read_text(encoding="utf-8")
     assert "debian-archive.sh" in dockerfile_56

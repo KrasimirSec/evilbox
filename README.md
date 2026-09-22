@@ -238,7 +238,7 @@ Requires Docker. The sample never gets a route to the public internet (`--networ
 
 - **evalhook** is **vendored** at a pinned commit under [`sandbox/php/vendor/php-eval-hook/`](sandbox/php/vendor/php-eval-hook/). The image **does not** `git clone` at build time. See [`sandbox/php/vendor/SOURCES.md`](sandbox/php/vendor/SOURCES.md) for the GitHub URL, commit, and archive SHA-256.
 - **PHP** is not stored in git. The Dockerfile uses `php:8.3-cli-bookworm@sha256:…` so the tag cannot drift. Docker still **pulls that digest once** if you do not already have it.
-- Extra Debian packages (`dnsmasq`, `python3-cryptography`, …) are installed from apt on the first uncached build. PHP 7.4/5.6 use `archive.debian.org` (live bullseye-security 404s after LTS, including on Apple Silicon).
+- Extra Debian packages (`dnsmasq`, `python3-cryptography`, …) are installed from apt on the first uncached build. PHP 7.4 uses `archive.debian.org` **bullseye main only** (live security 404s, and archive has no bullseye-security suite).
 
 ## Tests
 

@@ -1,29 +1,22 @@
 #!/bin/sh
-# Debian 11 (bullseye) and older are on archive.debian.org after LTS.
-# Live deb.debian.org/debian-security still serves InRelease but 404s the
-# .deb files (amd64 Linux and arm64 Docker Desktop on macOS).
+# Point EOL Debian at archive.debian.org main only.
+# Live security mirrors 404 .debs after LTS. archive.debian.org has no
+# bullseye-security suite (only up through buster), so security lines are dropped.
 set -eu
 
-rewrite() {
-  _file=$1
-  [ -f "$_file" ] || return 0
-  sed -i \
-    -e 's|https://deb.debian.org/debian|http://archive.debian.org/debian|g' \
-    -e 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' \
-    -e 's|https://security.debian.org|http://archive.debian.org/debian-security|g' \
-    -e 's|http://security.debian.org|http://archive.debian.org/debian-security|g' \
-    -e 's|https://cdn-aws.deb.debian.org/debian|http://archive.debian.org/debian|g' \
-    -e 's|http://cdn-aws.deb.debian.org/debian|http://archive.debian.org/debian|g' \
-    "$_file"
-}
-
-rewrite /etc/apt/sources.list
-if [ -d /etc/apt/sources.list.d ]; then
-  for _file in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-    rewrite "$_file"
-  done
+. /etc/os-release
+codename=${VERSION_CODENAME:-}
+if [ -z "$codename" ]; then
+  case ${VERSION_ID:-} in
+    11*) codename=bullseye ;;
+    9*)  codename=stretch ;;
+    8*)  codename=jessie ;;
+    *)   codename=stretch ;;
+  esac
 fi
 
+printf 'deb http://archive.debian.org/debian %s main\n' "$codename" > /etc/apt/sources.list
+rm -rf /etc/apt/sources.list.d
 mkdir -p /etc/apt/apt.conf.d
 cat > /etc/apt/apt.conf.d/99archive <<'EOF'
 Acquire::Check-Valid-Until "false";

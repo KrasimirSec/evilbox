@@ -22,7 +22,6 @@ RUN /bin/sh /tmp/debian-archive.sh \
     && rm -rf /var/lib/apt/lists/*
 
 # Stretch images may only ship Python 2; the sink is written for Python 3.
-# Prefer python3 when the archive still has it.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-crypto || true
 
 COPY php-sandbox.ini /usr/local/etc/php/conf.d/zz-sandbox.ini

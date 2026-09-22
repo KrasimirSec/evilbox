@@ -31,6 +31,6 @@ That index includes linux/amd64 and linux/arm64 (PHP 8.3.33). Docker Hub still h
 
 PHP 7.4 and 5.6 labs use the frozen upstream tags `php:7.4-cli-bullseye` (`Dockerfile.7.4`) and `php:5.6-cli` (`Dockerfile.5.6`). Both tags are multi-arch (amd64 + arm64). 7.4 still builds evalhook (PHP 7 `compile_string` ABI). 5.6 cannot: evalhook needs `zend_string`. That image still applies request profiles, WordPress stubs, and the sleep hook.
 
-Debian 11 (bullseye) and older live security mirrors 404 after LTS. `debian-archive.sh` rewrites apt sources to `archive.debian.org` and disables `Valid-Until` so `apt-get install` works on Linux and on Docker Desktop for macOS. Bookworm (PHP 8.3) still uses the live mirrors, with apt retries.
+Debian 11 (bullseye) live security mirrors 404 after LTS. `archive.debian.org` has **bullseye main** (amd64 and arm64) but **no bullseye-security suite**. `Dockerfile.7.4` replaces apt sources with archive main only. PHP 5.6 does the same via `debian-archive.sh`. Bookworm (PHP 8.3) still uses the live mirrors, with apt retries.
 
 To bump either pin: update this file, replace `vendor/php-eval-hook/` (and SHA256SUMS), and change the `FROM` digest in the Dockerfile after reviewing the new sources.
