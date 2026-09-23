@@ -31,9 +31,9 @@ def pretty_php(source: str) -> str:
             out.append(ch)
             if ch == "\n":
                 bol = True
-                rest = source[i + 1 :]
-                line = rest.split("\n", 1)[0].strip()
-                if line == heredoc_end or line == heredoc_end + ";":
+                line_end = source.find("\n", i + 1)
+                line = source[i + 1 :] if line_end == -1 else source[i + 1 : line_end]
+                if line.strip() == heredoc_end or line.strip() == heredoc_end + ";":
                     heredoc_end = None
             i += 1
             continue

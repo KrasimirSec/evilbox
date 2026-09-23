@@ -42,10 +42,12 @@ from evilbox.rewrite import (
     enclosing_function_id,
     has_error,
     inside_branch,
-    php_open_tag_length,
     inside_loop,
     node_text,
+    php_open_tag_length,
     reset_source_encoding,
+    source_bytes,
+    source_encoding,
     stmt_span,
     use_source_encoding,
     walk,
@@ -69,6 +71,10 @@ PHP_SUPERGLOBALS = {
     "_SESSION",
 }
 
+# A payload variable longer than this is ciphertext, not a decoder name.
+# Dropping it after a splice keeps later passes off the packed blob.
+_DEAD_PAYLOAD_MIN = 80
+
 
 @dataclass
 class Value:
@@ -87,6 +93,13 @@ class FoldEnv:
     concat_rhs: dict[ScopeKey, object] = field(default_factory=dict)
     concat_extra: dict[ScopeKey, list] = field(default_factory=dict)
     history: dict[ScopeKey, list[tuple[int, Value | None, bool]]] = field(default_factory=dict)
+    # Statement spans that built the current scalar/array value (assignment plus `.=`).
+    assignment_spans: dict[ScopeKey, list[tuple[int, int]]] = field(default_factory=dict)
+    # eval/include splices: (start, end, variable keys read while folding, inserted text)
+    splice_sites: list[tuple[int, int, list[ScopeKey], str]] = field(default_factory=list)
+    pending_splice: tuple[int, int, list[ScopeKey]] | None = None
+    _track_reads: bool = False
+    _read_keys: list[ScopeKey] = field(default_factory=list)
     php_version: str = "8.3"
     path: str | None = None
     original: str | None = None
@@ -102,6 +115,7 @@ class FoldEnv:
         self.keyed_arrays.pop(key, None)
         self.concat_rhs.pop(key, None)
         self.concat_extra.pop(key, None)
+        self.assignment_spans.pop(key, None)
 
     def record(self, node, name: str, value: Value | None, unsound: bool) -> None:
         key = self.key(node, name)
@@ -116,7 +130,17 @@ class FoldEnv:
         last = prior[-1]
         if last[2] or last[1] is None:
             return None
+        if self._track_reads and key not in self._read_keys:
+            self._read_keys.append(key)
         return last[1]
+
+    def note_assignment(self, source: str, node, name: str, *, append: bool) -> None:
+        key = self.key(node, name)
+        span = stmt_span(source, node)
+        if append:
+            self.assignment_spans.setdefault(key, []).append(span)
+        else:
+            self.assignment_spans[key] = [span]
 
 
 # PHP accepts define('SELF') / define('PARENT') and a bare use of that constant.
@@ -445,6 +469,10 @@ def transform_php(
             original_text = node_text(source, node)
             if rendered != original_text:
                 replacements.append((node.start_byte, node.end_byte, rendered))
+                if env.pending_splice is not None:
+                    start, end, keys = env.pending_splice
+                    env.splice_sites.append((start, end, keys, rendered))
+        replacements.extend(_dead_payload_replacements(source, env))
         text = apply_replacements(source, replacements)
         text = _rename_junk(text)
         text, gap_warnings = _repair_parser_gaps(text)
@@ -503,6 +531,7 @@ def collect_env(tree, source: str) -> FoldEnv:
                 env.scalars.pop(key, None)
                 env.concat_rhs.pop(key, None)
                 env.concat_extra.pop(key, None)
+                env.note_assignment(source, node, name, append=False)
                 continue
             item = const_eval(right, source, env)
             if item is not None and not item.splice_raw:
@@ -510,6 +539,7 @@ def collect_env(tree, source: str) -> FoldEnv:
                 env.scalars[key] = item
                 env.concat_rhs[key] = right
                 env.concat_extra[key] = []
+                env.note_assignment(source, node, name, append=False)
             else:
                 env.record(node, name, None, False if item is None else True)
                 env.drop(left, name)
@@ -533,6 +563,7 @@ def collect_env(tree, source: str) -> FoldEnv:
             env.record(node, name, combined, False)
             env.scalars[key] = combined
             env.concat_extra.setdefault(key, []).append(node)
+            env.note_assignment(source, node, name, append=True)
         else:
             env.record(node, name, None, True)
             env.drop(left, name)
@@ -848,6 +879,8 @@ def _php_array_elements(node, source: str, env: FoldEnv | None) -> list[Value] |
 
 
 def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str | None:
+    if env is not None:
+        env.pending_splice = None
     if node.type == "string":
         return _simplified_string(node, source)
     if node.type in {
@@ -868,7 +901,14 @@ def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str 
             parent = node.parent
             if parent is not None and parent.type == "binary_expression" and _binary_op(parent, source) == ".":
                 return None
-        val = const_eval(node, source, env)
+        if env is not None:
+            env._track_reads = True
+            env._read_keys = []
+        try:
+            val = const_eval(node, source, env)
+        finally:
+            if env is not None:
+                env._track_reads = False
         if val is None:
             return None
         text = _format_value(val)
@@ -876,8 +916,80 @@ def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str 
             return None
         if val.splice_raw:
             text = _strip_php_tags(text)
+            if env is not None:
+                env.pending_splice = (node.start_byte, node.end_byte, list(env._read_keys))
         return text
     return None
+
+
+def _payload_length(val: Value | None) -> int:
+    if val is None:
+        return 0
+    if isinstance(val.py, (str, bytes)):
+        return len(val.py)
+    return 0
+
+
+def _variable_referenced(source: str, name: str, skip: list[tuple[int, int]], extras: list[str]) -> bool:
+    """True when `$name` survives outside the assignment and the spliced expression."""
+    encoding = source_encoding(source)
+    try:
+        encoded_name = name.encode(encoding)
+    except UnicodeEncodeError:
+        return True
+    pattern = re.compile(rb"(?<![A-Za-z0-9_])\$(?:\{)?" + re.escape(encoded_name) + rb"(?![A-Za-z0-9_])")
+    for extra in extras:
+        try:
+            blob = extra.encode(encoding)
+        except UnicodeEncodeError:
+            blob = extra.encode("utf-8", errors="replace")
+        if pattern.search(blob):
+            return True
+    data = source_bytes(source, encoding)
+    for match in pattern.finditer(data):
+        at = match.start()
+        if any(start <= at < end for start, end in skip):
+            continue
+        return True
+    return False
+
+
+def _dead_payload_replacements(source: str, env: FoldEnv) -> list[tuple[int, int, str]]:
+    """Delete a long assignment once a splice consumed it and nothing else reads it.
+
+    `$blob = '<ciphertext>'; eval(gzinflate(base64_decode($blob)));` otherwise
+    keeps the ciphertext beside the unpacked shell, and every later pass scans both.
+    """
+    if not env.splice_sites:
+        return []
+    rendered = [text for _start, _end, _keys, text in env.splice_sites]
+    sites_for: dict[ScopeKey, list[tuple[int, int]]] = {}
+    for start, end, keys, _text in env.splice_sites:
+        for key in keys:
+            sites_for.setdefault(key, []).append((start, end))
+    out: list[tuple[int, int, str]] = []
+    seen: set[tuple[int, int]] = set()
+    dropped: list[str] = []
+    for key, sites in sites_for.items():
+        spans = env.assignment_spans.get(key) or []
+        if not spans or _payload_length(env.scalars.get(key)) < _DEAD_PAYLOAD_MIN:
+            continue
+        if _variable_referenced(source, key[1], [*spans, *sites], rendered):
+            continue
+        removed = False
+        for span in spans:
+            if span in seen or any(not (span[1] <= site[0] or span[0] >= site[1]) for site in sites):
+                continue
+            seen.add(span)
+            out.append((span[0], span[1], ""))
+            removed = True
+        if removed:
+            dropped.append("$" + key[1])
+    if dropped:
+        env.warnings.append(
+            "Dropped unused payload assignment " + ", ".join(dropped) + " after unpacking."
+        )
+    return out
 
 
 def _strip_php_tags(code: str) -> str:

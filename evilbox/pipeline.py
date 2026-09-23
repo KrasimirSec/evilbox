@@ -105,6 +105,22 @@ class Result:
     sandbox_cross_check: dict | None = None
 
 
+def _analysis_layers(layers: list[Layer]) -> list[tuple[str, str]]:
+    """Packed original, eval dumps, and the final text.
+
+    Unwrap passes in between are the same shell with small folds applied.
+    Indicator and capability scans are regex and parse passes over the whole
+    buffer, so repeating them on every copy dominates a large decode.
+    """
+    if len(layers) <= 2:
+        return [(layer.name, layer.text) for layer in layers]
+    chosen = [layer for layer in layers if layer.kind in {"original", "eval-dump"}]
+    last = layers[-1]
+    if all(layer is not last and layer.text is not last.text for layer in chosen):
+        chosen.append(last)
+    return [(layer.name, layer.text) for layer in chosen]
+
+
 def _layer(name: str, kind: str, text: str, *, language: str) -> Layer:
     layer = Layer(name=name, kind=kind, text=text, sha256=sha256_text(text))
     layer.unresolved = scan_unresolved(text, language=language, layer=name)
@@ -203,8 +219,10 @@ def deobfuscate(
     if encoders:
         failed_folds = True
 
-    indicators = extract_indicators(*(layer.text for layer in layers))
-    layer_pairs = [(layer.name, layer.text) for layer in layers]
+    # Middle passes repeat the unpacked shell. Scanning every copy is what makes
+    # a large eval payload exceed the web decode limit.
+    layer_pairs = _analysis_layers(layers)
+    indicators = extract_indicators(*(text for _name, text in layer_pairs))
     classification = classify_layers(layer_pairs, language=lang)
     surface = extract_surface(original, language=lang)
     packer = packer_hints(original)

@@ -208,6 +208,56 @@ def test_php_rot13():
     assert "str_rot13" not in result.text
 
 
+def _rot13_gzinflate_blob(payload: str) -> str:
+    """str_rot13(gzdeflate(str_rot13(payload))) as base64, matching the bh.php wrapper."""
+    import codecs
+
+    rot = codecs.encode(payload, "rot_13")
+    compressor = zlib.compressobj(wbits=-15)
+    raw = compressor.compress(rot.encode("latin-1")) + compressor.flush()
+    twisted = codecs.encode(raw.decode("latin-1"), "rot_13")
+    return base64.b64encode(twisted.encode("latin-1")).decode("ascii")
+
+
+def test_php_dead_payload_assignment_is_dropped():
+    """A variable used only as eval() ciphertext must not survive next to the shell."""
+    marker = "FilesMan" + ("-" * 40)
+    payload = f"$default_action = '{marker}';\n" + "\n".join(
+        f"$row{i} = 'cell-{i}-" + ("q" * 30) + "';" for i in range(30)
+    )
+    blob = _rot13_gzinflate_blob(payload)
+    assert len(blob) >= 80
+    src = (
+        "<?php $blackhat = '"
+        + blob
+        + "'; eval(str_rot13(gzinflate(str_rot13(base64_decode(($blackhat))))));"
+    )
+    result = deobfuscate(src, language="php")
+    assert marker in result.text
+    assert "$default_action" in result.text
+    assert blob not in result.text
+    assert "$blackhat" not in result.text
+    assert "gzinflate" not in result.text
+    assert "Dropped unused payload assignment" in " ".join(result.warnings)
+
+
+def test_php_payload_assignment_kept_when_still_read():
+    marker = "kept-payload"
+    pad = "".join("abcdefghijklmnopqrstuvwxyz012345"[(i * 7 + 3) % 32] for i in range(180))
+    payload = f"echo '{marker}'; /* {pad} */"
+    blob = _rot13_gzinflate_blob(payload)
+    assert len(blob) >= 80
+    src = (
+        "<?php $blackhat = '"
+        + blob
+        + "'; eval(str_rot13(gzinflate(str_rot13(base64_decode($blackhat))))); echo $blackhat;"
+    )
+    result = deobfuscate(src, language="php")
+    assert marker in result.text
+    assert "$blackhat" in result.text
+    assert blob in result.text
+
+
 def test_fixture_js_fromcharcode():
     src = (FIXTURES / "fromcharcode.js").read_text(encoding="utf-8")
     result = deobfuscate(src, language="auto", path=str(FIXTURES / "fromcharcode.js"))
