@@ -49,13 +49,22 @@ def test_cli_batch(tmp_path):
     assert (out / "clusters.json").is_file()
 
 
-def test_cli_sandbox_js_uses_static_js(tmp_path, capsys):
+def test_cli_sandbox_js_uses_browser_lab(tmp_path, monkeypatch, capsys):
+    seen: dict = {}
+
+    def fake_run(sample, **kwargs):
+        seen["sample"] = sample
+        seen.update(kwargs)
+        raise SandboxError("stop-js")
+
+    monkeypatch.setattr("evilbox.cli.run_js_sandbox", fake_run)
     src = tmp_path / "x.js"
     src.write_text('var a = ["en"]; var b = ["op"]; var x = b[0] + a[0];\n', encoding="utf-8")
-    assert main([str(src), "--sandbox", "observe"]) == 0
-    captured = capsys.readouterr()
-    assert "JavaScript" in captured.err
-    assert "open" in captured.out
+    assert main([str(src), "--sandbox", "observe", "--sandbox-host", "checkout.shop.test"]) == 2
+    assert seen.get("mode") == "observe"
+    assert seen.get("host") == "checkout.shop.test"
+    assert seen.get("timeout") >= 20
+    assert "stop-js" in capsys.readouterr().err
 
 
 def test_interactive_menu_static(tmp_path, monkeypatch, capsys):
@@ -157,8 +166,9 @@ def test_cli_sandbox_help_mentions_first_build(capsys):
     else:
         raise AssertionError("expected --help to exit")
     out = capsys.readouterr().out
-    assert "vendored" in out.lower() or "offline" in out.lower() or "no network" in out.lower()
+    assert "Chromium" in out or "JavaScript" in out
     assert "Docker" in out or "docker" in out
+    assert "sandbox-host" in out
 
 
 def test_cli_missing_file(tmp_path, capsys):

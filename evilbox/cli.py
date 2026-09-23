@@ -12,7 +12,7 @@ from evilbox.extract import format_indicators, ingest_sandbox, locate_indicators
 from evilbox.interactive import run_interactive
 from evilbox.pipeline import deobfuscate
 from evilbox.report import build_report, dump_json, format_analysis, render_html
-from evilbox.sandbox import SandboxError, default_logs_root, run_php_sandbox
+from evilbox.sandbox import SandboxError, default_logs_root, run_js_sandbox, run_php_sandbox
 
 SAMPLE_EXTS = JS_EXTS | PHP_EXTS
 
@@ -126,7 +126,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sandbox",
         choices=("dump", "observe"),
-        help="Run the sample in an isolated Docker lab (needs a running daemon). First run unpacks vendored PHP and evalhook with no network. JavaScript stays on the static path.",
+        help="Run the sample in an isolated Docker lab (needs a running daemon). PHP uses vendored evalhook; JavaScript is opened in headless Chromium on a spoofed HTTPS site. Not exposed over HTTP.",
     )
     parser.add_argument(
         "--logs-dir",
@@ -136,12 +136,17 @@ def _main(argv: list[str] | None = None) -> int:
         "--timeout",
         type=int,
         default=15,
-        help="Sandbox PHP timeout in seconds (default: 15)",
+        help="Sandbox PHP/browser timeout in seconds (default: 15)",
     )
     parser.add_argument(
         "--keep-name",
         action="store_true",
         help="Mount the sample under its original filename inside the sandbox",
+    )
+    parser.add_argument(
+        "--sandbox-host",
+        default=None,
+        help="Hostname the JavaScript lab spoofs (HTTPS origin). Default: first domain in the sample, else www.shop-assets.net",
     )
     parser.add_argument(
         "--stage-file",
@@ -181,13 +186,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.sandbox:
         if lang == "js":
-            print(
-                "warning: --sandbox dump/observe uses the PHP evalhook lab; "
-                "this file is JavaScript, so running static JS cleanup instead.",
-                file=sys.stderr,
-            )
-            result = deobfuscate(source, language="js", path=path, max_passes=args.max_passes)
-            return _emit(args, result, path)
+            return _run_js_sandbox(args, source, path)
         return _run_sandbox(args, source, path)
 
     result = deobfuscate(
@@ -268,6 +267,84 @@ def _run_batch(args) -> int:
     return status
 
 
+def _run_js_sandbox(args, source: str, path: str | None) -> int:
+    logs_root = Path(args.logs_dir) if args.logs_dir else default_logs_root()
+    tmp_sample: Path | None = None
+    if path is None or args.input == "-":
+        try:
+            logs_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CliError(_os_message(exc, str(logs_root))) from exc
+        tmp_sample = logs_root / ".stdin-sample.js"
+        _write_text(tmp_sample, source)
+        sample = tmp_sample
+    else:
+        sample = Path(path)
+
+    try:
+        result = run_js_sandbox(
+            sample,
+            mode=args.sandbox,
+            logs_root=logs_root,
+            timeout=max(int(args.timeout), 20),
+            profile=getattr(args, "sandbox_profile", "default"),
+            keep_name=bool(getattr(args, "keep_name", False)),
+            stage_file=Path(args.stage_file) if getattr(args, "stage_file", None) else None,
+            host=getattr(args, "sandbox_host", None),
+        )
+    except SandboxError as exc:
+        raise CliError(str(exc)) from exc
+    finally:
+        if tmp_sample is not None:
+            tmp_sample.unlink(missing_ok=True)
+
+    print(f"sandbox logs: {result.log_dir}", file=sys.stderr)
+    if result.host:
+        print(f"sandbox origin: https://{result.host}/", file=sys.stderr)
+    analysis = result.analysis
+    iocs = ingest_sandbox(
+        analysis.indicators if analysis is not None else None,
+        extra_domains=result.domains,
+        http=result.http,
+        tcp=getattr(result, "tcp", None),
+    )
+    sandbox_meta = {
+        "log_dir": str(result.log_dir),
+        "mode": args.sandbox,
+        "kind": "js",
+        "host": result.host,
+        "domains": result.domains,
+        "http": result.http,
+        "tcp": getattr(result, "tcp", None),
+        "eval_dumps": [p.name for p in result.eval_dumps],
+        "docker_status": result.docker_status,
+        "profile": getattr(args, "sandbox_profile", "default"),
+        "cross_check": getattr(analysis, "sandbox_cross_check", None) if analysis is not None else None,
+    }
+    _write_text(result.log_dir / "indicators.json", json.dumps(iocs.to_dict(), indent=2) + "\n")
+    if result.eval_dumps:
+        print("eval dumps: " + ", ".join(p.name for p in result.eval_dumps), file=sys.stderr)
+    if analysis is None:
+        return _write_output(args.output, result.deobfuscated)
+    analysis.indicators = iocs
+    sandbox_rows = locate_indicators(
+        [("sandbox", result.deobfuscated)],
+        extra_domains=result.domains,
+        http=result.http,
+        tcp=getattr(result, "tcp", None),
+    )
+    existing = list(analysis.indicators_by_layer or [])
+    seen = {(row["kind"], row["value"].lower(), row["layer"]) for row in existing}
+    for row in sandbox_rows:
+        key = (row["kind"], row["value"].lower(), row["layer"])
+        if key in seen:
+            continue
+        existing.append(row)
+        seen.add(key)
+    analysis.indicators_by_layer = existing
+    return _emit(args, analysis, str(sample), sandbox=sandbox_meta)
+
+
 def _run_sandbox(args, source: str, path: str | None) -> int:
     logs_root = Path(args.logs_dir) if args.logs_dir else default_logs_root()
     tmp_sample: Path | None = None
@@ -310,6 +387,7 @@ def _run_sandbox(args, source: str, path: str | None) -> int:
     sandbox_meta = {
         "log_dir": str(result.log_dir),
         "mode": args.sandbox,
+        "kind": "php",
         "domains": result.domains,
         "http": result.http,
         "tcp": getattr(result, "tcp", None),

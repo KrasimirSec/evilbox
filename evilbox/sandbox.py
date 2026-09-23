@@ -16,6 +16,7 @@ from pathlib import Path
 from evilbox.pipeline import deobfuscate
 
 IMAGE_NAME = "evilbox-php-sandbox"
+JS_IMAGE_NAME = "evilbox-js-sandbox"
 DOCKER_INFO_TIMEOUT = 10
 DOCKER_BUILD_TIMEOUT = 600
 QUERY_RE = re.compile(r"query\[[^\]]+\]\s+(\S+)", re.I)
@@ -41,6 +42,15 @@ def sandbox_context_dir() -> Path:
     raise SandboxError("Could not find sandbox/php/Dockerfile (run from the Evilbox repo).")
 
 
+def js_sandbox_root() -> Path:
+    start = Path(__file__).resolve().parent
+    for base in [start, *start.parents]:
+        candidate = base / "sandbox" / "js" / "Dockerfile"
+        if candidate.is_file():
+            return candidate.parent.parent
+    raise SandboxError("Could not find sandbox/js/Dockerfile (run from the Evilbox repo).")
+
+
 @dataclass
 class SandboxResult:
     log_dir: Path
@@ -52,6 +62,8 @@ class SandboxResult:
     http: list[dict]
     analysis: object | None = None
     tcp: list[dict] | None = None
+    host: str | None = None
+    kind: str = "php"
 
 
 def _status(message: str) -> None:
@@ -199,9 +211,19 @@ def _rootfs_tarball_name(dockerfile: Path, arch: str) -> str:
     return f"php-{version}-cli-alpine-linux-{arch}.tar.gz"
 
 
+def _build_is_offline(dockerfile: Path | None) -> bool:
+    if dockerfile is None:
+        return True
+    if dockerfile.parent.name == "js":
+        return False
+    if dockerfile.name.endswith("5.6"):
+        return False
+    return True
+
+
 def build_image(context: Path, tag: str, *, dockerfile: Path | None = None) -> None:
     arch = docker_server_arch()
-    offline = dockerfile is None or not dockerfile.name.endswith("5.6")
+    offline = _build_is_offline(dockerfile)
     cmd = ["docker", "build", "--progress=plain"]
     if offline:
         cmd.extend(["--network", "none"])
@@ -451,9 +473,26 @@ def finalize_logs(log_dir: Path) -> tuple[list[str], list[Path]]:
             host = str(rec.get("host") or "").split(":")[0].lower()
             if host:
                 domains.add(host)
+    cdp_jsonl = log_dir / "cdp-network.jsonl"
+    if _is_safe_regular_file(cdp_jsonl, log_dir):
+        for line in _safe_read_text(cdp_jsonl, log_dir).splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            host = _host_from_url(str(rec.get("url") or ""))
+            if host and host not in {".", "localhost"}:
+                domains.add(host)
     dumps = sorted(
         p
-        for p in list(log_dir.glob("eval-*.php")) + list(log_dir.glob("php/eval-*.php"))
+        for p in (
+            list(log_dir.glob("eval-*.php"))
+            + list(log_dir.glob("php/eval-*.php"))
+            + list(log_dir.glob("eval-*.js"))
+            + list(log_dir.glob("php/eval-*.js"))
+        )
         if _is_safe_regular_file(p, log_dir)
     )
     summary = {
@@ -515,6 +554,382 @@ def _copy_container_logs(container_name: str, log_dir: Path) -> None:
     if proc.returncode != 0:
         (log_dir / "docker.cp.err").write_text(proc.stderr or proc.stdout or "", encoding="utf-8")
     _reject_symlinks(log_dir)
+
+
+_JS_SKIP_TLDS = {
+    "js",
+    "css",
+    "gif",
+    "png",
+    "jpg",
+    "jpeg",
+    "php",
+    "json",
+    "html",
+    "htm",
+    "map",
+    "svg",
+    "woff",
+    "woff2",
+    "ttf",
+    "wasm",
+    "xml",
+    "txt",
+    "min",
+    "asp",
+    "aspx",
+    "jsp",
+}
+_JS_SKIP_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "example.com",
+    "example.org",
+    "example.net",
+    "googleapis.com",
+    "gstatic.com",
+    "google.com",
+    "google-analytics.com",
+    "doubleclick.net",
+    "facebook.com",
+    "fbcdn.net",
+    "twitter.com",
+    "x.com",
+    "jquery.com",
+    "jsdelivr.net",
+    "unpkg.com",
+    "cdnjs.cloudflare.com",
+    "bootstrapcdn.com",
+    "fontawesome.com",
+    "w3.org",
+    "schema.org",
+    "gravatar.com",
+}
+_JS_HOST_RE = re.compile(
+    r"(?i)(?:https?://)?(?:www\.)?([a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+)"
+)
+
+
+def _host_from_url(url: str) -> str:
+    raw = (url or "").strip()
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    host = raw.split("/")[0].split("?")[0].split("@")[-1].split(":")[0].strip().lower().strip(".")
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    return host
+
+
+def _usable_js_host(host: str, skip_suffix: tuple[str, ...]) -> bool:
+    if not host or host in _JS_SKIP_HOSTS or host.endswith(skip_suffix):
+        return False
+    labels = [part for part in host.split(".") if part]
+    if len(labels) < 2:
+        return False
+    if labels[-1] in _JS_SKIP_TLDS:
+        return False
+    if all(part.isdigit() for part in labels):
+        return False
+    return True
+
+
+def guess_js_host(source: str, explicit: str | None = None) -> str:
+    if explicit:
+        raw = explicit.strip()
+        if "://" in raw:
+            raw = raw.split("://", 1)[1]
+        host = raw.split("/")[0].split("@")[-1].split(":")[0].lower().strip(".")
+        if host:
+            return host
+    skip_suffix = tuple("." + h for h in _JS_SKIP_HOSTS)
+    seen: list[str] = []
+    for match in _JS_HOST_RE.finditer(source or ""):
+        host = match.group(1).lower().rstrip(".")
+        if not _usable_js_host(host, skip_suffix):
+            continue
+        if host not in seen:
+            seen.append(host)
+    if seen:
+        return seen[0]
+    return "www.shop-assets.net"
+
+
+def js_context_digest(root: Path, dockerfile: Path) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(dockerfile.read_bytes())
+    paths = [
+        root / "js" / "Dockerfile",
+        root / "js" / "entrypoint.sh",
+        root / "js" / "visit.py",
+        root / "js" / "front.py",
+        root / "js" / "wrap.py",
+        root / "js" / "stealth.js",
+        root / "js" / "hook.js",
+        root / "js" / "site.css",
+        root / "php" / "sink.py",
+        root / "php" / "tcp_logger.py",
+        root / "php" / "collect_domains.py",
+        root / "php" / "dnsmasq.conf",
+    ]
+    for path in paths:
+        hasher.update(path.name.encode("utf-8"))
+        hasher.update(b"\0")
+        if path.is_file():
+            hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def prepare_js_sandbox_image() -> tuple[Path, Path, str]:
+    root = js_sandbox_root()
+    dockerfile = root / "js" / "Dockerfile"
+    if not dockerfile.is_file():
+        raise SandboxError("Could not find sandbox/js/Dockerfile (run from the Evilbox repo).")
+    tag = f"{JS_IMAGE_NAME}:{js_context_digest(root, dockerfile)}"
+    digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()[:12]
+    _status(f"dockerfile {dockerfile} ({dockerfile.stat().st_size} bytes, sha256 {digest})")
+    if docker_image_exists(tag):
+        _status(f"using cached sandbox image {tag}")
+        return root, dockerfile, tag
+    _status(
+        f"building sandbox image {tag} "
+        "(JavaScript Chromium lab; first run installs the browser from Debian — needs network once)"
+    )
+    build_image(root, tag, dockerfile=dockerfile)
+    return root, dockerfile, tag
+
+
+def docker_js_run_args(
+    *,
+    tag: str,
+    sample: Path,
+    mode: str,
+    timeout: int,
+    container_name: str,
+    profile: str,
+    host: str,
+    keep_name: bool = False,
+    stage_file: Path | None = None,
+    memory_swap: bool | None = None,
+) -> list[str]:
+    if profile not in SANDBOX_PROFILES:
+        profile = "default"
+    if memory_swap is None:
+        memory_swap = docker_supports_memory_swap()
+    sample_name = sample.name if keep_name else "sample.js"
+    if "/" in sample_name or sample_name in {".", ".."} or not sample_name:
+        sample_name = "sample.js"
+    dst = f"/samples/{sample_name}"
+    script_path = "/assets/app.min.js"
+    args = [
+        "docker",
+        "run",
+        "--name",
+        container_name,
+        "--network",
+        "none",
+        "--read-only",
+        "--shm-size",
+        "1g",
+        "--memory",
+        "2g",
+        "--security-opt",
+        "seccomp=unconfined",
+    ]
+    if memory_swap:
+        args.extend(["--memory-swap", "2g"])
+    args.extend(
+        [
+            "--cpus",
+            "2",
+            "--pids-limit",
+            "256",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "NET_ADMIN",
+            "--cap-add",
+            "NET_RAW",
+            "--cap-add",
+            "NET_BIND_SERVICE",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "FOWNER",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            f"SANDBOX_MODE={mode}",
+            "--env",
+            f"SANDBOX_TIMEOUT={timeout}",
+            "--env",
+            f"SANDBOX_PROFILE={profile}",
+            "--env",
+            f"SANDBOX_HOST={host}",
+            "--env",
+            f"SANDBOX_SAMPLE={dst}",
+            "--env",
+            f"SANDBOX_SCRIPT_PATH={script_path}",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "XDG_CONFIG_HOME=/tmp",
+            "--env",
+            "XDG_CACHE_HOME=/tmp",
+            "--mount",
+            f"type=bind,src={sample.resolve()},dst={dst},readonly=true",
+            "--mount",
+            "type=tmpfs,destination=/logs,tmpfs-mode=1777",
+            "--mount",
+            "type=tmpfs,destination=/tmp,tmpfs-mode=1777",
+            "--mount",
+            "type=tmpfs,destination=/run,tmpfs-mode=1777",
+            "--mount",
+            "type=tmpfs,destination=/dev/shm,tmpfs-size=1073741824",
+        ]
+    )
+    if stage_file is not None:
+        args.extend(
+            [
+                "--mount",
+                f"type=bind,src={stage_file.resolve()},dst=/opt/sandbox/stage.bin,readonly=true",
+            ]
+        )
+    args.extend([tag, dst])
+    return args
+
+
+def run_js_sandbox(
+    sample: Path,
+    *,
+    mode: str,
+    logs_root: Path,
+    timeout: int = 20,
+    profile: str = "default",
+    keep_name: bool = False,
+    stage_file: Path | None = None,
+    host: str | None = None,
+) -> SandboxResult:
+    if mode not in {"dump", "observe"}:
+        raise SandboxError("mode must be dump or observe")
+    ensure_docker()
+    sample = sample.resolve()
+    if not sample.is_file():
+        raise SandboxError(f"sample not found: {sample}")
+    if sample.is_symlink():
+        raise SandboxError(f"refusing to run a symlinked sample: {sample}")
+    if stage_file is not None:
+        stage_file = stage_file.resolve()
+        if not stage_file.is_file() or stage_file.is_symlink():
+            raise SandboxError(f"stage file not found or is a symlink: {stage_file}")
+    source = sample.read_text(encoding="utf-8", errors="replace")
+    spoofed = guess_js_host(source, host)
+    _status(f"preparing JavaScript Chromium sandbox ({mode}) as https://{spoofed}/")
+    _context, _dockerfile, tag = prepare_js_sandbox_image()
+    run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    container_name = f"evilbox-js-{run_id}"
+    log_dir = (logs_root / run_id).resolve()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    mount_name = sample.name if keep_name else "sample.js"
+    if "/" in mount_name or mount_name in {".", ".."} or not mount_name:
+        mount_name = "sample.js"
+    mount_sample = stage_bind_source(sample, run_id=run_id, name=mount_name)
+    mount_stage = (
+        stage_bind_source(stage_file, run_id=run_id, name="stage.bin") if stage_file is not None else None
+    )
+    args = docker_js_run_args(
+        tag=tag,
+        sample=mount_sample,
+        mode=mode,
+        timeout=timeout,
+        container_name=container_name,
+        profile=profile,
+        host=spoofed,
+        keep_name=True,
+        stage_file=mount_stage,
+    )
+    host_timeout = timeout + 120
+    _status(
+        f"visiting https://{spoofed}/ in headless Chromium "
+        f"(page limited to {timeout}s; host waits up to {host_timeout}s)"
+    )
+    proc: subprocess.CompletedProcess[str] | None = None
+    timed_out = False
+    try:
+        try:
+            proc = _run(args, timeout=host_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _status("container exceeded host timeout; killing it")
+            _run(["docker", "kill", container_name], timeout=30)
+        try:
+            _status("copying /logs out of the container")
+            _copy_container_logs(container_name, log_dir)
+        finally:
+            _run(["docker", "rm", "-f", container_name], timeout=30)
+    finally:
+        cleanup_bind_stage(run_id)
+
+    if proc is not None:
+        (log_dir / "docker.stdout.log").write_text(proc.stdout or "", encoding="utf-8")
+        (log_dir / "docker.stderr.log").write_text(proc.stderr or "", encoding="utf-8")
+        (log_dir / "docker.status").write_text(str(proc.returncode) + "\n", encoding="utf-8")
+        status = proc.returncode
+    else:
+        (log_dir / "docker.status").write_text("timeout\n", encoding="utf-8")
+        status = -1
+
+    domains, dumps = finalize_logs(log_dir)
+    extra_layers: list[tuple[str, str]] = []
+    dump_texts: list[str] = []
+    for index, dump in enumerate(dumps, start=1):
+        text = _safe_read_text(dump, log_dir)
+        dump_texts.append(text)
+        extra_layers.append((f"eval-dump-{index}", text))
+    inner = dump_texts[-1] if dump_texts else source
+    static = deobfuscate(source, language="js", path=str(sample))
+    cleaned = deobfuscate(
+        inner,
+        language="js",
+        path=str(sample),
+        surface_text=source,
+        extra_layers=extra_layers[:-1] if extra_layers else None,
+    )
+    from evilbox.pipeline import cross_check_layers
+
+    cross = cross_check_layers(original_inner=static.text, dump_text=inner, static_text=cleaned.text)
+    if not cross["agree"]:
+        cleaned.warnings.append("static inner disagrees with sandbox dump layer")
+    cleaned.sandbox_cross_check = cross
+    http = collect_http(log_dir)
+    tcp = collect_tcp(log_dir)
+    out_js = log_dir / "deobfuscated.js"
+    if out_js.is_symlink():
+        out_js.unlink()
+    _safe_write_text(out_js, cleaned.text, log_dir)
+    _safe_write_text(log_dir / "cross-check.json", json.dumps(cross, indent=2) + "\n", log_dir)
+    if timed_out:
+        raise SandboxError(f"sandbox timed out after {host_timeout}s; logs kept at {log_dir}")
+    _status(f"sandbox finished (docker status {status}); logs at {log_dir}")
+    return SandboxResult(
+        log_dir=log_dir,
+        domains=domains,
+        eval_dumps=dumps,
+        deobfuscated=cleaned.text,
+        docker_status=status,
+        image_tag=tag,
+        http=http,
+        analysis=cleaned,
+        tcp=tcp,
+        host=spoofed,
+        kind="js",
+    )
 
 
 def run_php_sandbox(

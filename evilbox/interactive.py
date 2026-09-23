@@ -8,8 +8,8 @@ def run_interactive(run_argv) -> int:
     """Menu when evilbox is started with no arguments. run_argv is cli._main."""
     print("Evilbox")
     print("  1) Deobfuscate a file")
-    print("  2) PHP sandbox (dump: log eval, do not run payloads)")
-    print("  3) PHP sandbox (observe: run in isolated Docker)")
+    print("  2) Sandbox dump (PHP evalhook or JS Chromium: log, skip payloads)")
+    print("  3) Sandbox observe (isolated Docker: PHP or headless Chromium)")
     print("  4) Batch a directory of .js / .php samples")
     print("  5) Open the web decoder (paste/upload in a browser)")
     print("  6) Quit")

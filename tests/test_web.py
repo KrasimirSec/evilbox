@@ -88,6 +88,7 @@ def test_index_page(web_url):
     assert "Not executed" in text
     assert "spider climbing out" in text
     assert "evilbox sample.php --sandbox observe" in text
+    assert "evilbox sample.js --sandbox observe" in text
     assert "text/html" in headers.get("Content-Type", "")
 
 

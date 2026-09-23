@@ -42,7 +42,27 @@ def main() -> int:
             host = str(rec.get("host") or "").split(":")[0].lower()
             if host:
                 domains.add(host)
-    evals = sorted(list(LOGS.glob("eval-*.php")) + list(LOGS.glob("php/eval-*.php")))
+    cdp_jsonl = LOGS / "cdp-network.jsonl"
+    if cdp_jsonl.exists():
+        for line in cdp_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            url = str(rec.get("url") or "")
+            host = ""
+            if "://" in url:
+                host = url.split("://", 1)[1].split("/")[0].split("@")[-1].split(":")[0].lower()
+            if host and host not in {".", "localhost"}:
+                domains.add(host)
+    evals = sorted(
+        list(LOGS.glob("eval-*.php"))
+        + list(LOGS.glob("php/eval-*.php"))
+        + list(LOGS.glob("eval-*.js"))
+        + list(LOGS.glob("php/eval-*.js"))
+    )
     summary = {
         "domains": sorted(domains),
         "http_requests": requests,

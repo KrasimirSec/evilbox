@@ -243,7 +243,7 @@
       </div>
     </div>
     <div class="pills">
-      <div class="pill" title="The web UI never runs JavaScript or PHP. Decode rewrites encodings and the syntax tree in-process. Isolated PHP execution is CLI-only: evilbox --sandbox observe">Not executed</div>
+      <div class="pill" title="The web UI never runs JavaScript or PHP. Decode rewrites encodings and the syntax tree in-process. Isolated Docker execution is CLI-only: evilbox --sandbox observe">Not executed</div>
     </div>
   </header>
   <main>
@@ -269,8 +269,11 @@
         <p class="note">
           <strong>Not executed</strong> means this page never runs the sample. There is no JS engine
           and no PHP engine over HTTP — only static unwraps and AST rewrites, in memory for this request.
-          To actually run PHP in an isolated Docker lab, use the CLI:
-          <code>evilbox sample.php --sandbox observe</code>. JavaScript stays static even there.
+          To actually run a sample in an isolated Docker lab, use the CLI:
+          <code>evilbox sample.php --sandbox observe</code>
+          or
+          <code>evilbox sample.js --sandbox observe</code>.
+          The web UI never starts those labs.
         </p>
       </div>
     </section>
