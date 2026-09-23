@@ -121,7 +121,9 @@ class FoldEnv:
 
 # PHP accepts define('SELF') / define('PARENT') and a bare use of that constant.
 # tree-sitter folds them into the self:: / parent:: keywords unless '::' follows.
+# `new self` and `instanceof parent` are real keywords, not those constants.
 _BARE_CONSTANTS = frozenset({"self", "parent"})
+_CLASS_REF_KEYWORDS = frozenset({"new", "instanceof"})
 
 
 def _parse_error_count(source: str) -> int:
@@ -137,7 +139,8 @@ def _repair_parser_gaps(source: str) -> tuple[str, list[str]]:
     """Rewrite valid PHP that tree-sitter-php rejects, once a fold is otherwise done.
 
     Kept when the rewrite parses, or when it removes errors but some other gap
-    remains. `self::` / `parent::`, nowdocs, and single-quoted text stay as written.
+    remains. `self::` / `parent::`, `new self`, `instanceof parent`, nowdocs,
+    and single-quoted text stay as written.
     """
     if not has_error(parse_php(source).root_node):
         return source, []
@@ -246,6 +249,7 @@ def _normalize_parser_gaps(source: str) -> str:
                 name.lower() in _BARE_CONSTANTS
                 and not _ident_glued(source, i)
                 and not _followed_by_double_colon(source, nxt)
+                and not _class_keyword_operand(source, i)
             ):
                 out.append(f"constant('{name}')")
                 i = nxt
@@ -271,6 +275,21 @@ def _followed_by_double_colon(source: str, index: int) -> bool:
     while index < len(source) and source[index] in " \t\r\n":
         index += 1
     return source.startswith("::", index)
+
+
+def _class_keyword_operand(source: str, index: int) -> bool:
+    """True when this ident is the class named by `new` or `instanceof`.
+
+    `new self` is the enclosing class. Rewriting it to `new constant('self')`
+    still parses, and PHP then instantiates a class named constant.
+    """
+    j = index - 1
+    while j >= 0 and source[j] in " \t\r\n":
+        j -= 1
+    end = j + 1
+    while j >= 0 and source[j].isascii() and (source[j].isalnum() or source[j] == "_"):
+        j -= 1
+    return source[j + 1 : end].lower() in _CLASS_REF_KEYWORDS
 
 
 def _read_ident(source: str, index: int) -> tuple[str, int] | None:
