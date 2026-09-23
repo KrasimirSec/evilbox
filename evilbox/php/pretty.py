@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from evilbox.rewrite import php_open_tag_length
+
 
 def pretty_php(source: str) -> str:
     """Indent PHP using brace/semicolon rules, leaving string and comment contents alone."""
@@ -9,9 +11,11 @@ def pretty_php(source: str) -> str:
     bol = True
     in_squote = False
     in_dquote = False
+    in_backtick = False
     in_line_comment = False
     in_block_comment = False
     heredoc_end: str | None = None
+    in_php = not (source.lstrip().startswith("<?") or "<?" in source[:200])
 
     def write_indent() -> None:
         nonlocal bol
@@ -74,6 +78,37 @@ def pretty_php(source: str) -> str:
             if ch == '"':
                 in_dquote = False
             i += 1
+            continue
+
+        if in_backtick:
+            out.append(ch)
+            if ch == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == "`":
+                in_backtick = False
+            i += 1
+            continue
+
+        if not in_php:
+            tag = php_open_tag_length(source, i)
+            if tag is not None:
+                out.append(source[i : i + tag])
+                i += tag
+                in_php = True
+                bol = False
+                continue
+            out.append(ch)
+            bol = ch == "\n"
+            i += 1
+            continue
+
+        if source.startswith("?>", i):
+            out.append("?>")
+            i += 2
+            in_php = False
+            bol = False
             continue
 
         if ch == "/" and nxt == "/":
@@ -165,6 +200,12 @@ def pretty_php(source: str) -> str:
             write_indent()
             out.append(ch)
             in_dquote = True
+            i += 1
+            continue
+        if ch == "`":
+            write_indent()
+            out.append(ch)
+            in_backtick = True
             i += 1
             continue
 

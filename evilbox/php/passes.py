@@ -40,7 +40,9 @@ from evilbox.parsers import parse_php
 from evilbox.rewrite import (
     apply_replacements,
     enclosing_function_id,
+    has_error,
     inside_branch,
+    php_open_tag_length,
     inside_loop,
     node_text,
     reset_source_encoding,
@@ -117,6 +119,308 @@ class FoldEnv:
         return last[1]
 
 
+# PHP accepts define('SELF') / define('PARENT') and a bare use of that constant.
+# tree-sitter folds them into the self:: / parent:: keywords unless '::' follows.
+_BARE_CONSTANTS = frozenset({"self", "parent"})
+
+
+def _parse_error_count(source: str) -> int:
+    tree = parse_php(source)
+    count = 0
+    for node in walk(tree.root_node):
+        if node.type == "ERROR" or node.is_missing:
+            count += 1
+    return count
+
+
+def _repair_parser_gaps(source: str) -> tuple[str, list[str]]:
+    """Rewrite valid PHP that tree-sitter-php rejects, once a fold is otherwise done.
+
+    Kept when the rewrite parses, or when it removes errors but some other gap
+    remains. `self::` / `parent::`, nowdocs, and single-quoted text stay as written.
+    """
+    if not has_error(parse_php(source).root_node):
+        return source, []
+    repaired = _normalize_parser_gaps(source)
+    if repaired == source:
+        return source, []
+    after = _parse_error_count(repaired)
+    if after == 0:
+        return repaired, [
+            "Rewrote self/parent constants and string interpolation the PHP parser rejects."
+        ]
+    if after < _parse_error_count(source):
+        return repaired, [
+            "Rewrote self/parent constants and string interpolation; some parser gaps remain."
+        ]
+    return source, []
+
+
+def _starts_in_html(source: str) -> bool:
+    """Match parse_php: a `<?` tag selects the mixed HTML grammar."""
+    return source.lstrip().startswith("<?") or "<?" in source[:200]
+
+
+def _normalize_parser_gaps(source: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    in_php = not _starts_in_html(source)
+    while i < n:
+        if not in_php:
+            tag = php_open_tag_length(source, i)
+            if tag is not None:
+                out.append(source[i : i + tag])
+                i += tag
+                in_php = True
+                continue
+            out.append(source[i])
+            i += 1
+            continue
+        if source.startswith("?>", i):
+            out.append("?>")
+            i += 2
+            in_php = False
+            continue
+        if source.startswith("//", i) or source[i] == "#":
+            step = 2 if source.startswith("//", i) else 1
+            out.append(source[i : i + step])
+            i += step
+            while i < n and source[i] != "\n":
+                if source.startswith("?>", i):
+                    break
+                out.append(source[i])
+                i += 1
+            continue
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            if end == -1:
+                out.append(source[i:])
+                break
+            out.append(source[i : end + 2])
+            i = end + 2
+            continue
+        heredoc = _heredoc_open(source, i)
+        if heredoc is not None:
+            label, interpolates, body_at = heredoc
+            close = _heredoc_close(source, body_at, label)
+            if close is None:
+                out.append(source[i])
+                i += 1
+                continue
+            out.append(source[i:body_at])
+            if interpolates:
+                _scan_interpolated(source, body_at, close, out)
+            else:
+                out.append(source[body_at:close])
+            close_end = source.find("\n", close)
+            if close_end == -1:
+                close_end = n
+            else:
+                close_end += 1
+            out.append(source[close:close_end])
+            i = close_end
+            continue
+        ch = source[i]
+        if ch == "'":
+            i = _copy_squote(source, i, out)
+            continue
+        if ch == '"':
+            i = _scan_interpolated(source, i + 1, None, out, opening='"')
+            continue
+        if ch == "`":
+            i = _scan_interpolated(source, i + 1, None, out, opening="`")
+            continue
+        if ch in "bB" and i + 1 < n and source[i + 1] in "'\"":
+            out.append(ch)
+            i += 1
+            if source[i] == "'":
+                i = _copy_squote(source, i, out)
+            else:
+                i = _scan_interpolated(source, i + 1, None, out, opening='"')
+            continue
+        ident = _read_ident(source, i)
+        if ident is not None:
+            name, nxt = ident
+            if (
+                name.lower() in _BARE_CONSTANTS
+                and not _ident_glued(source, i)
+                and not _followed_by_double_colon(source, nxt)
+            ):
+                out.append(f"constant('{name}')")
+                i = nxt
+                continue
+            out.append(name)
+            i = nxt
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _ident_glued(source: str, index: int) -> bool:
+    if index == 0:
+        return False
+    prev = source[index - 1]
+    if prev.isalnum() or prev == "_" or prev in "$\\":
+        return True
+    return index >= 2 and source[index - 2 : index] == "::"
+
+
+def _followed_by_double_colon(source: str, index: int) -> bool:
+    while index < len(source) and source[index] in " \t\r\n":
+        index += 1
+    return source.startswith("::", index)
+
+
+def _read_ident(source: str, index: int) -> tuple[str, int] | None:
+    if index >= len(source):
+        return None
+    ch = source[index]
+    if not (ch.isascii() and (ch.isalpha() or ch == "_")):
+        return None
+    j = index + 1
+    while j < len(source):
+        nxt = source[j]
+        if not (nxt.isascii() and (nxt.isalnum() or nxt == "_")):
+            break
+        j += 1
+    return source[index:j], j
+
+
+def _copy_squote(source: str, index: int, out: list[str]) -> int:
+    out.append("'")
+    i = index + 1
+    n = len(source)
+    while i < n:
+        if source[i] == "\\" and i + 1 < n:
+            out.append(source[i : i + 2])
+            i += 2
+            continue
+        out.append(source[i])
+        if source[i] == "'":
+            return i + 1
+        i += 1
+    return i
+
+
+def _scan_interpolated(
+    source: str,
+    index: int,
+    stop: int | None,
+    out: list[str],
+    *,
+    opening: str | None = None,
+) -> int:
+    """Copy a double-quoted string, backtick string, or heredoc body.
+
+    `$var[key]` becomes `{$var['key']}` and `$var->prop` becomes `{$var->prop}`
+    so tree-sitter can parse keyword indexes and properties. `stop` bounds a
+    heredoc body. `opening` is the quote this function still has to emit.
+    """
+    if opening is not None:
+        out.append(opening)
+    i = index
+    n = len(source) if stop is None else stop
+    while i < n:
+        ch = source[i]
+        if ch == "\\" and i + 1 < n:
+            out.append(source[i : i + 2])
+            i += 2
+            continue
+        if opening is not None and ch == opening:
+            out.append(ch)
+            return i + 1
+        # `{$...}` is already complex syntax; rewriting the `$` inside it doubles the braces.
+        if (
+            ch == "$"
+            and i + 1 < n
+            and source[i + 1] != "{"
+            and not (i > 0 and source[i - 1] == "{")
+        ):
+            ident = _read_ident(source, i + 1)
+            if ident is not None:
+                name, after = ident
+                key = _bare_index(source, after, n)
+                if key is not None:
+                    word, end = key
+                    out.append("{$" + name + "['" + word + "']}")
+                    i = end
+                    continue
+                prop = _bare_prop(source, after, n)
+                if prop is not None:
+                    word, end = prop
+                    out.append("{$" + name + "->" + word + "}")
+                    i = end
+                    continue
+        out.append(ch)
+        i += 1
+    return i
+
+
+def _bare_index(source: str, index: int, limit: int) -> tuple[str, int] | None:
+    """`$var[key]` simple-string index. Any bare word, so a new keyword still rewrites."""
+    if index >= limit or source[index] != "[":
+        return None
+    ident = _read_ident(source, index + 1)
+    if ident is None:
+        return None
+    word, after = ident
+    if after >= limit or source[after] != "]":
+        return None
+    return word, after + 1
+
+
+def _bare_prop(source: str, index: int, limit: int) -> tuple[str, int] | None:
+    """One `$var->prop` level. PHP simple syntax does not interpolate a second `->`."""
+    if index + 1 >= limit or source[index : index + 2] != "->":
+        return None
+    ident = _read_ident(source, index + 2)
+    if ident is None:
+        return None
+    return ident
+
+
+def _heredoc_open(source: str, index: int) -> tuple[str, bool, int] | None:
+    if not source.startswith("<<<", index):
+        return None
+    j = index + 3
+    quote = ""
+    if j < len(source) and source[j] in "'\"":
+        quote = source[j]
+        j += 1
+    ident = _read_ident(source, j)
+    if ident is None:
+        return None
+    label, k = ident
+    if quote:
+        if k >= len(source) or source[k] != quote:
+            return None
+        k += 1
+    if k < len(source) and source[k] == "\r":
+        k += 1
+    if k >= len(source) or source[k] != "\n":
+        return None
+    return label, quote != "'", k + 1
+
+
+def _heredoc_close(source: str, body_at: int, label: str) -> int | None:
+    line = body_at
+    n = len(source)
+    while line <= n:
+        end = source.find("\n", line)
+        if end == -1:
+            end = n
+        chunk = source[line:end]
+        stripped = chunk.strip()
+        if stripped == label or stripped == label + ";":
+            return line
+        if end == n:
+            return None
+        line = end + 1
+    return None
+
+
 def transform_php(
     source: str,
     *,
@@ -143,6 +447,8 @@ def transform_php(
                 replacements.append((node.start_byte, node.end_byte, rendered))
         text = apply_replacements(source, replacements)
         text = _rename_junk(text)
+        text, gap_warnings = _repair_parser_gaps(text)
+        warnings.extend(gap_warnings)
         warnings.extend(env.warnings)
         return text, warnings
     finally:

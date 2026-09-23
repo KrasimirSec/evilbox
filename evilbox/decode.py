@@ -560,7 +560,40 @@ def js_quote(value: str) -> str:
 
 
 def php_quote(value: str) -> str:
+    """PHP literal for a byte string.
+
+    Single quotes cannot spell NUL or other controls without embedding the raw
+    byte, and tree-sitter rejects a raw NUL inside quotes. Those values use
+    double quotes and `\\xHH`, so a later fold still parses.
+    """
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return _php_double_quote(value)
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _php_double_quote(value: str) -> str:
+    out: list[str] = []
+    for ch in value:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "$":
+            out.append("\\$")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif code < 32 or code == 127:
+            out.append(f"\\x{code:02x}")
+        elif code > 255:
+            out.append(f"\\u{{{code:x}}}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def format_js_number(value: float | int) -> str:
