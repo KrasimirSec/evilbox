@@ -8,5 +8,4 @@ build/
 .pytest_cache/
 .DS_Store
 sandbox-logs/
-.cursor/
 
