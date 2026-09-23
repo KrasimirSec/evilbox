@@ -171,6 +171,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 
 - Dean Edwards `p.a.c.k.e.r.` (`eval(function(p,a,c,k,e,d)…`), including nested layers
 - javascript-obfuscator / obfuscator.io / sojson / jsjiami string-array + rotator + index decoder, including base64, RC4, and hex array encodings
+- javascript-obfuscator control-flow flattening (dispatcher objects and `split("|")` switches), dead branches of constant string comparisons, constant object properties, and debug-protection / self-defending wrappers. The script is not executed
 - JSFuck (`[]()!+`) Function-constructor payloads, percent-encoded bookmarklets, jjencode, and a best-effort AAEncode unwrap
 - Split identifiers: `$f = "bas"."e64"."_dec"."ode"` and `$f .= ...` / JS `"at"+"ob"` / `window['at'+'ob']`
 - PHP charset-table indexes such as `$fn = $s[41].$s[16].…` used as `preg_replace /e` / `create_function` names
@@ -188,7 +189,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - Fold `file_get_contents(__FILE__)` / `__DIR__` sibling payloads when the extra file is next to the sample
 - Rename `_0x…`, lookalike `O0Il` names, long underscore names, and non-ASCII identifier homoglyphs
 
-**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample (PAS cookie autokey is unwrapped when the password is a common webshell key); EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; self-defending `debugger` traps; domain locks; full control-flow flattening / VM unpackers; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
+**Detected, not decoded** (need a missing key, another file, or a network/runtime): XOR/RC4 keys in cookies, POST, or a second file that is not next to the sample (PAS cookie autokey is unwrapped when the password is a common webshell key); EXIF / fake images / `.htaccess` `auto_prepend_file` / database options; request-driven shells with no payload; DNS TXT, blockchain, Telegram, pastebin, or CDN-fetched bodies; referrer/UA/geo cloaking; domain locks that are not the standard self-defending wrapper; unpackers that only reveal the payload by running the script; **ionCube / Zend Guard / SourceGuardian** bytecode (`encoded, not analyzable`).
 
 `gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 2 MiB. Incomplete streams are refused (no unbounded `flush()`).
 
