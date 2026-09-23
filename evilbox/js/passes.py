@@ -18,6 +18,7 @@ from evilbox.decode import (
     unescape_html_entities,
     unescape_js_string_body,
 )
+from evilbox.js.structure import simplify_js_structure
 from evilbox.parsers import parse_js
 from evilbox.rewrite import (
     apply_replacements,
@@ -173,21 +174,37 @@ def transform_js(source: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     token = use_source_encoding(source)
     try:
-        tree = parse_js(source)
-        env = collect_env(tree, source)
-        replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, js_quote))
-        for node in walk(tree.root_node):
-            rendered = _render_if_simplified(node, source, env)
-            if rendered is None:
-                continue
-            original = node_text(source, node)
-            if rendered != original:
-                replacements.append((node.start_byte, node.end_byte, rendered))
-        text = apply_replacements(source, replacements)
-        text = _rename_junk(text)
-        return text, warnings
+        for _ in range(6):
+            folded, fold_warnings = _fold_js(source)
+            structured, struct_warnings = simplify_js_structure(folded)
+            warnings.extend(fold_warnings)
+            warnings.extend(struct_warnings)
+            if structured == source:
+                break
+            source = structured
+        deduped: list[str] = []
+        for warning in warnings:
+            if warning not in deduped:
+                deduped.append(warning)
+        return source, deduped
     finally:
         reset_source_encoding(token)
+
+
+def _fold_js(source: str) -> tuple[str, list[str]]:
+    tree = parse_js(source)
+    env = collect_env(tree, source)
+    replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, js_quote))
+    for node in walk(tree.root_node):
+        rendered = _render_if_simplified(node, source, env)
+        if rendered is None:
+            continue
+        original = node_text(source, node)
+        if rendered != original:
+            replacements.append((node.start_byte, node.end_byte, rendered))
+    text = apply_replacements(source, replacements)
+    text = _rename_junk(text)
+    return text, []
 
 
 def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
@@ -540,7 +557,21 @@ def _array_element(node, source: str) -> Value | None:
     return const_eval(node, source, env=None)
 
 
+def _parens_are_syntax(node) -> bool:
+    """`if` / `while` / `switch` / `for` need the parentheses even when the test is constant."""
+    parent = node.parent
+    return parent is not None and parent.type in {
+        "if_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "for_statement",
+    }
+
+
 def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str | None:
+    if node.type == "parenthesized_expression" and _parens_are_syntax(node):
+        return None
     if node.type in {"string", "string_fragment"}:
         if node.type == "string":
             return _simplified_string(node, source)
@@ -757,7 +788,7 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if val is None:
         return None
     if op == "!":
-        return Value(not bool(val.py))
+        return Value(not _js_truthy(val.py))
     if op == "+" and isinstance(val.py, (int, float)) and not isinstance(val.py, bool):
         return Value(+val.py)
     if op == "-" and isinstance(val.py, (int, float)) and not isinstance(val.py, bool):
@@ -854,6 +885,21 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
 def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not (isinstance(value, float) and math.isnan(value))
+
+
+def _js_truthy(value: Any) -> bool:
+    """JavaScript ToBoolean, including empty arrays (objects are truthy)."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value != ""
+    return True
 
 
 def _call_args(node):
