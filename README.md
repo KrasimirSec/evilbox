@@ -16,7 +16,7 @@ bin/evilbox serve
 bin/evilbox packed.php --sandbox observe --logs-dir ./sandbox-logs --timeout 20
 ```
 
-In the Cursor/VS Code terminal for this workspace, `bin` is prepended to `PATH`, so `evilbox` works the same way (no `bin/` prefix). New terminals pick that up.
+In a terminal opened for this workspace, `bin` is prepended to `PATH`, so `evilbox` works the same way (no `bin/` prefix). New terminals pick that up.
 
 If you use [direnv](https://direnv.net/), `direnv allow` in this directory does the same for any shell: `cd` here, then type `evilbox`.
 
