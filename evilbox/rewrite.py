@@ -9,6 +9,11 @@ _STEP = (34, 39, 239, 18, 246, 4, 252, 9, 174, 43, 36, 255, 1, 7)
 _STEP_SEED = 41
 
 _ENCODING: contextvars.ContextVar[str] = contextvars.ContextVar("evilbox_source_encoding", default="utf-8")
+# One cached encoding of the source currently being walked. node_text() is
+# called once per AST node; re-encoding a large file each time dominates decode.
+_BYTES: contextvars.ContextVar[tuple[str, str, bytes] | None] = contextvars.ContextVar(
+    "evilbox_source_bytes", default=None
+)
 
 LOOP_TYPES = frozenset(
     {
@@ -51,8 +56,22 @@ FUNCTION_TYPES = frozenset(
 )
 
 
+def source_bytes(source: str, encoding: str) -> bytes:
+    """Encode `source` once per string. Later slices reuse the same buffer."""
+    cached = _BYTES.get()
+    if cached is not None and cached[0] is source and cached[1] == encoding:
+        return cached[2]
+    data = source.encode(encoding)
+    _BYTES.set((source, encoding, data))
+    return data
+
+
 def source_encoding(source: str) -> str:
-    return "latin-1" if all(ord(ch) < 256 for ch in source) else "utf-8"
+    try:
+        source_bytes(source, "latin-1")
+    except UnicodeEncodeError:
+        return "utf-8"
+    return "latin-1"
 
 
 def php_open_tag_length(source: str, index: int) -> int | None:
@@ -88,7 +107,7 @@ def apply_replacements(source: str, replacements: list[tuple[int, int, str]]) ->
     if not replacements:
         return source
     encoding = _enc()
-    data = source.encode(encoding)
+    data = source_bytes(source, encoding)
     kept: list[tuple[int, int, str]] = []
     ordered = sorted(replacements, key=lambda r: (r[0], -(r[1] - r[0])))
     for start, end, text in ordered:
@@ -114,7 +133,7 @@ def apply_replacements(source: str, replacements: list[tuple[int, int, str]]) ->
 
 def node_text(source: str, node) -> str:
     encoding = _enc()
-    data = source.encode(encoding)
+    data = source_bytes(source, encoding)
     return data[node.start_byte : node.end_byte].decode(encoding, errors="replace")
 
 
@@ -130,7 +149,7 @@ def walk(node):
 
 def stmt_span(source: str, node) -> tuple[int, int]:
     """Byte range of a statement, including a trailing semicolon and newline."""
-    data = source.encode(_enc())
+    data = source_bytes(source, _enc())
     end = node.end_byte
     while end < len(data) and data[end] in b" \t":
         end += 1
