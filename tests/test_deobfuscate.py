@@ -157,6 +157,44 @@ def test_php_control_char_string_fold_stays_parseable():
     assert "\\x00" in result.text or "\\0" in result.text
 
 
+def test_php_new_self_is_not_rewritten_as_a_constant():
+    """`new self` must survive a parser-gap repair.
+
+    tree-sitter rejects `"$arg[class]"`, so the repair runs. `new self` is the
+    enclosing class, not a constant. `new constant('self')` still parses and
+    instantiates a class named constant.
+    """
+    src = """<?php
+class Box {
+    function make() { return new self; }
+    function make2() { return new self(); }
+}
+class Child extends Box {
+    function make3() { return new parent; }
+    function make4() { return NEW parent(); }
+    function check($x) { return $x instanceof self || $x InstanceOf parent; }
+}
+define('SELF', 'script.php');
+define('PARENT', 'parent.php');
+echo SELF;
+echo (PARENT);
+echo "$arg[class]";
+"""
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "new self;" in result.text
+    assert "new self();" in result.text
+    assert "new parent;" in result.text
+    assert "NEW parent();" in result.text
+    assert "instanceof self" in result.text
+    assert "InstanceOf parent" in result.text
+    assert "new constant(" not in result.text
+    assert "instanceof constant(" not in result.text
+    assert "constant('SELF')" in result.text
+    assert "constant('PARENT')" in result.text
+    assert "{$arg['class']}" in result.text
+
+
 def test_php_keyword_index_in_valid_file_is_left_alone():
     src = '<?php echo "$arg[title]";'
     result = deobfuscate(src, language="php")
