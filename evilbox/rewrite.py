@@ -55,6 +55,23 @@ def source_encoding(source: str) -> str:
     return "latin-1" if all(ord(ch) < 256 for ch in source) else "utf-8"
 
 
+def php_open_tag_length(source: str, index: int) -> int | None:
+    """Byte length of a `<?php` / `<?=` / `<?` tag at index, if one starts there.
+
+    `<?php` is case-insensitive and must not be glued to an identifier (`<?phpinfo`).
+    """
+    if not source.startswith("<?", index):
+        return None
+    if index + 2 < len(source) and source[index + 2] == "=":
+        return 3
+    if source[index + 2 : index + 5].lower() == "php":
+        nxt = index + 5
+        if nxt < len(source) and (source[nxt].isalnum() or source[nxt] == "_"):
+            return None
+        return 5
+    return 2
+
+
 def use_source_encoding(source: str):
     return _ENCODING.set(source_encoding(source))
 

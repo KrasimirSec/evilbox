@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from evilbox.classify import Classification, classify_layers, cluster_key, cluster_minhash
+from evilbox.decode import looks_like_php_source
 from evilbox.detect import detect_language
 from evilbox.encoders import detect_commercial_encoders
 from evilbox.extract import Indicators, extract_indicators, locate_indicators
@@ -17,6 +19,49 @@ from evilbox.rewrite import has_error
 from evilbox.signature import SurfaceSignatures, extract_surface
 from evilbox.unresolved import UnresolvedFold, scan_unresolved
 from evilbox.unwrap import unwrap_source
+
+# eval/assert/create_function wrapped around a decoder. Inner shells often call
+# base64_decode on their own, so a raw call count is not a progress signal.
+_PACKED_CHAIN_RE = re.compile(
+    r"\b(?:eval|assert|create_function)\s*\(\s*(?:gzinflate|gzuncompress|gzdecode|base64_decode|str_rot13|convert_uudecode|hex2bin|strrev)\s*\(",
+    re.I,
+)
+_JS_PACKED_CHAIN_RE = re.compile(
+    r"\beval\s*\(\s*(?:atob|unescape|decodeURIComponent|function\s*\()\s*",
+    re.I,
+)
+_LONG_LITERAL_RE = re.compile(r"""(['"])([^'"\\]{80,})\1""")
+
+
+def keep_decoded_despite_parse_errors(before: str, after: str, language: str) -> bool:
+    """Keep an unpack that the grammar rejects.
+
+    tree-sitter lags real PHP/JS. A decoded webshell is still the payload when
+    a packed eval/decoder chain or a long literal disappeared and the result
+    looks like source. Binary garbage does not.
+    """
+    if not after or after == before:
+        return False
+    if language == "php":
+        if not looks_like_php_source(after):
+            return False
+        packed = _PACKED_CHAIN_RE
+    else:
+        sample = after[:20000]
+        if "\0" in sample[:400]:
+            return False
+        printable = sum(1 for ch in sample if ch.isprintable() or ch in "\n\r\t")
+        if printable / max(len(sample), 1) < 0.85:
+            return False
+        if not re.search(r"\b(?:function|const|let|var|return)\b|=>", sample):
+            return False
+        packed = _JS_PACKED_CHAIN_RE
+    if len(packed.findall(after)) < len(packed.findall(before)):
+        return True
+    for match in _LONG_LITERAL_RE.finditer(before):
+        if match.group(2) not in after:
+            return True
+    return False
 
 
 @dataclass
@@ -109,6 +154,11 @@ def deobfuscate(
             break
         tree = parse(nxt)
         if has_error(tree.root_node):
+            if keep_decoded_despite_parse_errors(text, nxt, lang):
+                warnings.append("Decoded payload still has parser gaps; keeping the decoded text.")
+                text = nxt
+                layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
+                continue
             warnings.append("A pass produced unparseable code; keeping the previous version of that rewrite.")
             if unwrapped != text:
                 unwrap_tree = parse(unwrapped)

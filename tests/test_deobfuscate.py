@@ -63,6 +63,12 @@ def test_php_eval_base64():
     assert "eval" not in result.text
 
 
+def _gzinflate_b64(payload: str) -> str:
+    compressor = zlib.compressobj(wbits=-15)
+    raw = compressor.compress(payload.encode("latin-1")) + compressor.flush()
+    return base64.b64encode(raw).decode("ascii")
+
+
 def test_php_nested_gzinflate_base64():
     payload = b'echo "nested";'
     compressor = zlib.compressobj(wbits=-15)
@@ -73,6 +79,108 @@ def test_php_nested_gzinflate_base64():
     assert "nested" in result.text
     assert "gzinflate" not in result.text
     assert "base64_decode" not in result.text
+
+
+def test_php_parser_gaps_do_not_drop_decoded_payload():
+    """tree-sitter-php rejects valid PHP that shows up in unpacked shells.
+
+    SELF/PARENT constants, `$var[keyword]` / `$var->keyword` interpolation
+    (any case, heredoc, backtick, binary string), and a __halt_compiler trailer
+    must not cause the pipeline to revert to the packed eval().
+    """
+    inner = """
+define('SELF', 'script.php');
+define('PARENT', 'parent.php');
+class Box {
+    function id() { return self::class; }
+}
+class Child extends Box {
+    function parent_id() { return parent::class; }
+}
+@header('Location: '.SELF);
+echo PARENT;
+echo Self;
+echo (SELF);
+$arg = array('class' => 'c', 'title' => 't');
+p("$arg[title]<input class=\\"$arg[class]\\" />");
+p("$arg[CLASS]");
+p("$obj->class");
+echo <<<E
+$b[function]
+E;
+echo <<<'NOW'
+$a[class]
+NOW;
+echo b"$bin[class]";
+echo B"$wide[class]";
+echo `id $tick[class]`;
+echo Foo::SELF;
+?>
+<div>{keep-html}</div>
+<?PHP
+echo 1;
+"""
+    src = "<?php eval(gzinflate(base64_decode('" + _gzinflate_b64(inner) + "')));"
+    result = deobfuscate(src, language="php")
+    assert "gzinflate" not in result.text
+    assert "base64_decode" not in result.text
+    assert "define('SELF'" in result.text
+    assert "constant('SELF')" in result.text
+    assert "constant('PARENT')" in result.text
+    assert "constant('Self')" in result.text
+    assert "self::class" in result.text
+    assert "parent::class" in result.text
+    assert "Foo::SELF" in result.text
+    assert 'class="c"' in result.text
+    assert "{$arg['CLASS']}" in result.text
+    assert ">t<" in result.text or "t<input" in result.text
+    assert "{$obj->class}" in result.text
+    assert "{$b['function']}" in result.text
+    assert "{$bin['class']}" in result.text
+    assert "{$wide['class']}" in result.text
+    assert "{$tick['class']}" in result.text
+    assert "`id{$tick['class']}`" in "".join(result.text.split())
+    assert "$a[class]" in result.text
+    assert "{keep-html}" in result.text
+    assert result.parse_ok
+    assert result.failed_folds is False
+
+
+def test_php_control_char_string_fold_stays_parseable():
+    """Folding "\\x00" must not emit a raw NUL that the parser then rejects."""
+    inner = r"""$search = array("\x00", "\x0a", "\x0d", "\x1a"); echo $search[0];"""
+    src = "<?php eval(gzinflate(base64_decode('" + _gzinflate_b64(inner) + "')));"
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "\0" not in result.text
+    assert "gzinflate" not in result.text
+    assert "\\x00" in result.text or "\\0" in result.text
+
+
+def test_php_keyword_index_in_valid_file_is_left_alone():
+    src = '<?php echo "$arg[title]";'
+    result = deobfuscate(src, language="php")
+    assert '"$arg[title]"' in result.text
+    assert "constant(" not in result.text
+
+
+def test_php_halt_compiler_trailer_does_not_hide_payload():
+    inner = "echo 'kept-halt';\n__halt_compiler();\nNOT PHP\n"
+    blob = _gzinflate_b64(inner)
+    src = "<?php eval(gzinflate(base64_decode('" + blob + "')));"
+    result = deobfuscate(src, language="php")
+    assert "kept-halt" in result.text
+    assert blob not in result.text
+    assert "gzinflate" not in result.text
+
+
+def test_unparsed_binary_is_not_treated_as_a_decode():
+    from evilbox.pipeline import keep_decoded_despite_parse_errors
+
+    before = "<?php eval(gzinflate(base64_decode('" + ("A" * 80) + "')));"
+    assert keep_decoded_despite_parse_errors(before, "\x00" * 40, "php") is False
+    assert keep_decoded_despite_parse_errors(before, "this is not php source", "php") is False
+    assert keep_decoded_despite_parse_errors(before, "<?php echo 'unpacked';", "php") is True
 
 
 def test_php_gzdecode():
