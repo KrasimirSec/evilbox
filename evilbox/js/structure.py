@@ -412,6 +412,32 @@ def _emit_forward(args, source: str) -> str:
     return f"{_pexpr(args[0], source)}({', '.join(parts)})"
 
 
+def _chained_member(member) -> bool:
+    """True when this access is the base of another member or subscript.
+
+    Replacing ``obj.fn`` with a fresh function expression at each chain
+    (``obj.fn.extra = 1; sink(obj.fn.extra)``) creates two functions, so the
+    write and the read no longer refer to the same value.
+    """
+    parent = member.parent
+    return (
+        parent is not None
+        and parent.type in {"member_expression", "subscript_expression"}
+        and _same(parent.child_by_field_name("object"), member)
+    )
+
+
+def _is_direct_call(member) -> bool:
+    if _chained_member(member):
+        return False
+    call = member.parent
+    return (
+        call is not None
+        and call.type == "call_expression"
+        and _same(call.child_by_field_name("function"), member)
+    )
+
+
 def _emit_member(member, classified, source: str):
     call = member.parent
     is_call = (
@@ -579,7 +605,8 @@ def _writes_are_local(tree, source, name, decl_start, extras, alias) -> bool:
 
 
 def _use_replacements(tree, source, name, decl_start, props):
-    reps = []
+    uses = []
+    noncall: dict[str, int] = {}
     for ref in _refs(tree, source, name, decl_start):
         kind = _ref_kind(ref, source)
         if kind[0] != "member-read":
@@ -587,6 +614,15 @@ def _use_replacements(tree, source, name, decl_start, props):
         classified = props.get(kind[1])
         if classified is None:
             return None
+        # Each non-call read of a function property evaluates it again. Inlining
+        # a fresh function expression per read breaks later property writes.
+        if classified[0] != "literal" and not _is_direct_call(kind[2]):
+            noncall[kind[1]] = noncall.get(kind[1], 0) + 1
+        uses.append((kind, classified))
+    if any(count > 1 for count in noncall.values()):
+        return None
+    reps = []
+    for kind, classified in uses:
         emitted = _emit_member(kind[2], classified, source)
         if emitted is None:
             return None
@@ -798,6 +834,22 @@ def _is_infinite_loop(stmt, source: str) -> bool:
     return False
 
 
+def _is_postfix_increment(node) -> bool:
+    if node is None or node.type != "update_expression":
+        return False
+    op = next((child for child in node.children if not child.is_named and child.type == "++"), None)
+    arg = node.child_by_field_name("argument")
+    if op is None or arg is None:
+        return False
+    return op.start_byte > arg.start_byte
+
+
+def _is_plain_continue(stmt) -> bool:
+    if stmt.type != "continue_statement":
+        return False
+    return not any(child.type == "statement_identifier" for child in stmt.children)
+
+
 def _case_map(switch, source: str):
     body = switch.child_by_field_name("body")
     if body is None:
@@ -812,8 +864,13 @@ def _case_map(switch, source: str):
         if test is None or not isinstance(test.py, str) or not _DIGIT_RE.fullmatch(test.py) or test.py in cases:
             return None
         statements = _field_children(child, "body")
-        if statements and statements[-1].type == "continue_statement":
+        if statements and _is_plain_continue(statements[-1]):
             statements = statements[:-1]
+        # A remaining break/continue targets the dispatcher switch, not the
+        # flattened statement list. Leaving it in would break an outer loop
+        # or delete a labeled continue.
+        if any(stmt.type in {"break_statement", "continue_statement"} for stmt in statements):
+            return None
         cases[test.py] = statements
     return cases
 
@@ -836,7 +893,9 @@ def _flatten_loop(loop, seq_name: str, seq: str, iter_name: str, source: str) ->
     arg = index.child_by_field_name("argument")
     if arg is None or arg.type != "identifier" or node_text(source, arg) != iter_name:
         return None
-    if not any(not child.is_named and child.type == "++" for child in index.children):
+    # Prefix ++e starts at the next index. Treating it like e++ emits case 0,
+    # which the loop never enters.
+    if not _is_postfix_increment(index):
         return None
     cases = _case_map(switch, source)
     if cases is None:
@@ -878,6 +937,19 @@ def _binding_defined(tree, source: str, name: str) -> bool:
     return _name_counts(tree, source).get(name, 0) > 0
 
 
+# Parents whose children are a statement list. Anywhere else, a comma
+# expression is the single body of if/while/for/do/with/else/label, and
+# splitting it into sibling statements moves the tail outside that body.
+_MULTI_STMT_PARENTS = {"program", "statement_block", "switch_case", "switch_default"}
+
+
+def _sequence_statement_text(node, text: str) -> str:
+    parent = node.parent
+    if parent is not None and parent.type in _MULTI_STMT_PARENTS:
+        return text
+    return "{\n" + text + "\n}"
+
+
 def _cleanup_replacements(tree, source: str):
     reps = []
     undefined_free = not _binding_defined(tree, source, "undefined")
@@ -889,6 +961,7 @@ def _cleanup_replacements(tree, source: str):
                 parts = list(expr.named_children)
                 if len(parts) >= 2:
                     text = "\n".join(f"{node_text(source, part)};" for part in parts)
+                    text = _sequence_statement_text(node, text)
                     start, end = stmt_span(source, node)
                     reps.append((start, end, text + "\n"))
                     continue
@@ -899,6 +972,7 @@ def _cleanup_replacements(tree, source: str):
                 if len(parts) >= 2:
                     head = "\n".join(f"{node_text(source, part)};" for part in parts[:-1])
                     text = f"{head}\nreturn {node_text(source, parts[-1])};"
+                    text = _sequence_statement_text(node, text)
                     start, end = stmt_span(source, node)
                     reps.append((start, end, text + "\n"))
                     continue
@@ -983,6 +1057,75 @@ def _timer_statement(ident, source: str):
     return _stmt(call)
 
 
+def _is_self_increment_call(expr, name: str, source: str) -> bool:
+    expr = _unwrap(expr)
+    if expr is None or expr.type != "call_expression":
+        return False
+    callee = expr.child_by_field_name("function")
+    if callee is None or callee.type != "identifier" or node_text(source, callee) != name:
+        return False
+    args = _call_args(expr)
+    if len(args) != 1:
+        return False
+    arg = _unwrap(args[0])
+    return arg is not None and arg.type == "update_expression" and any(
+        not child.is_named and child.type == "++" for child in arg.children
+    )
+
+
+def _is_debug_trap(fn, source: str) -> bool:
+    """Nested ``function trap(counter) { debugger; trap(++counter); }`` shape."""
+    name = _function_name(fn, source)
+    body = fn.child_by_field_name("body")
+    if not name or body is None or body.type != "statement_block":
+        return False
+    if not _contains_debugger(fn, source):
+        return False
+    saw_call = False
+    for stmt in _block_stmts(body):
+        if stmt.type in {"debugger_statement", "if_statement"}:
+            continue
+        if (
+            stmt.type == "expression_statement"
+            and stmt.named_children
+            and _is_self_increment_call(stmt.named_children[0], name, source)
+        ):
+            saw_call = True
+            continue
+        return False
+    return saw_call
+
+
+def _try_body_is_single_if(stmt) -> bool:
+    if stmt.type != "try_statement":
+        return False
+    body = stmt.child_by_field_name("body")
+    if body is None:
+        return False
+    stmts = _block_stmts(body)
+    if len(stmts) != 1 or stmts[0].type != "if_statement":
+        return False
+    return any(child.type == "catch_clause" for child in stmt.named_children)
+
+
+def _is_debug_protection_function(target, source: str) -> bool:
+    """javascript-obfuscator debug-protection wrapper, not any timed function.
+
+    The known shape is only a nested trap plus ``try { if (ret) return trap;
+    else trap(0); } catch (e) {}``. A looser match deletes real callbacks that
+    mention "debugger", use try, and increment a counter.
+    """
+    body = target.child_by_field_name("body")
+    if body is None or body.type != "statement_block":
+        return False
+    stmts = _block_stmts(body)
+    if len(stmts) != 2:
+        return False
+    traps = [stmt for stmt in stmts if stmt.type == "function_declaration" and _is_debug_trap(stmt, source)]
+    tries = [stmt for stmt in stmts if _try_body_is_single_if(stmt)]
+    return len(traps) == 1 and len(tries) == 1
+
+
 def _debug_protection(tree, source: str):
     reps = []
     counts = _name_counts(tree, source)
@@ -1007,12 +1150,7 @@ def _debug_protection(tree, source: str):
             continue
         if not name or name_start is None or counts.get(name, 0) != 1:
             continue
-        if not _contains_debugger(target, source):
-            continue
-        body = target.child_by_field_name("body")
-        if body is None or not any(item.type == "try_statement" for item in walk(body)):
-            continue
-        if not any(item.type == "update_expression" and any(child.type == "++" for child in item.children) for item in walk(body)):
+        if not _is_debug_protection_function(target, source):
             continue
         refs = _refs(tree, source, name, name_start)
         if not refs:
