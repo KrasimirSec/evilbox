@@ -136,6 +136,13 @@ class FoldEnv:
 
     def note_assignment(self, source: str, node, name: str, *, append: bool) -> None:
         key = self.key(node, name)
+        # A chained `$keep = $blob = ...` is one statement. Deleting the inner
+        # assignment's span eats the semicolon and the other variable's value.
+        if not _deletable_assignment(node):
+            # A later nested write still produces the value. Dropping an earlier
+            # statement would leave that write behind with nothing to append to.
+            self.assignment_spans.pop(key, None)
+            return
         span = stmt_span(source, node)
         if append:
             self.assignment_spans.setdefault(key, []).append(span)
@@ -145,9 +152,23 @@ class FoldEnv:
 
 # PHP accepts define('SELF') / define('PARENT') and a bare use of that constant.
 # tree-sitter folds them into the self:: / parent:: keywords unless '::' follows.
-# `new self` and `instanceof parent` are real keywords, not those constants.
+# `new self`, `instanceof parent`, and type positions (`: self`, `self $x`) are
+# real keywords, not those constants.
 _BARE_CONSTANTS = frozenset({"self", "parent"})
-_CLASS_REF_KEYWORDS = frozenset({"new", "instanceof"})
+_CLASS_KEYWORD_WORDS = frozenset(
+    {
+        "new",
+        "instanceof",
+        "public",
+        "protected",
+        "private",
+        "static",
+        "readonly",
+        "var",
+    }
+)
+_CLASS_KEYWORD_SYMBOLS = frozenset({":", "?", "|", "&"})
+_CLASS_KEYWORD_NEXT = frozenset({"$", "|", "&"})
 
 
 def _parse_error_count(source: str) -> int:
@@ -163,8 +184,8 @@ def _repair_parser_gaps(source: str) -> tuple[str, list[str]]:
     """Rewrite valid PHP that tree-sitter-php rejects, once a fold is otherwise done.
 
     Kept when the rewrite parses, or when it removes errors but some other gap
-    remains. `self::` / `parent::`, `new self`, `instanceof parent`, nowdocs,
-    and single-quoted text stay as written.
+    remains. `self::` / `parent::`, `new self`, `instanceof parent`, type
+    positions, nowdocs, and single-quoted text stay as written.
     """
     if not has_error(parse_php(source).root_node):
         return source, []
@@ -273,7 +294,7 @@ def _normalize_parser_gaps(source: str) -> str:
                 name.lower() in _BARE_CONSTANTS
                 and not _ident_glued(source, i)
                 and not _followed_by_double_colon(source, nxt)
-                and not _class_keyword_operand(source, i)
+                and not _class_keyword_use(source, i, nxt)
             ):
                 out.append(f"constant('{name}')")
                 i = nxt
@@ -301,19 +322,126 @@ def _followed_by_double_colon(source: str, index: int) -> bool:
     return source.startswith("::", index)
 
 
-def _class_keyword_operand(source: str, index: int) -> bool:
-    """True when this ident is the class named by `new` or `instanceof`.
+def _class_keyword_use(source: str, start: int, end: int) -> bool:
+    """True when `self` / `parent` is a class keyword, not a defined constant.
 
-    `new self` is the enclosing class. Rewriting it to `new constant('self')`
-    still parses, and PHP then instantiates a class named constant.
+    `new self` instantiates the enclosing class. `: self`, `self $x`, and
+    `Foo|self` are types. Rewriting those to `constant('self')` still parses
+    often enough that the repair is kept, and PHP then uses the wrong class.
+    Comments between the keyword and the name do not change that.
     """
+    kind, text = _previous_code_token(source, start)
+    if kind == "word" and text.lower() in _CLASS_KEYWORD_WORDS:
+        return True
+    if kind == "symbol" and text in _CLASS_KEYWORD_SYMBOLS:
+        return True
+    nkind, ntext = _next_code_token(source, end)
+    return nkind == "symbol" and ntext in _CLASS_KEYWORD_NEXT
+
+
+def _previous_code_token(source: str, index: int) -> tuple[str, str]:
     j = index - 1
-    while j >= 0 and source[j] in " \t\r\n":
-        j -= 1
-    end = j + 1
-    while j >= 0 and source[j].isascii() and (source[j].isalnum() or source[j] == "_"):
-        j -= 1
-    return source[j + 1 : end].lower() in _CLASS_REF_KEYWORDS
+    while j >= 0:
+        if source[j] in " \t\r\n":
+            j -= 1
+            continue
+        if j >= 1 and source[j - 1 : j + 1] == "*/":
+            start = source.rfind("/*", 0, j - 1)
+            if start == -1:
+                break
+            j = start - 1
+            continue
+        line_start = source.rfind("\n", 0, j) + 1
+        comment_at = _line_comment_start(source, line_start, j)
+        if comment_at is not None:
+            j = comment_at - 1
+            continue
+        break
+    if j < 0:
+        return "none", ""
+    if source[j].isascii() and (source[j].isalnum() or source[j] == "_"):
+        end = j + 1
+        while j >= 0 and source[j].isascii() and (source[j].isalnum() or source[j] == "_"):
+            j -= 1
+        return "word", source[j + 1 : end]
+    return "symbol", source[j]
+
+
+def _next_code_token(source: str, index: int) -> tuple[str, str]:
+    n = len(source)
+    j = index
+    while j < n:
+        if source[j] in " \t\r\n":
+            j += 1
+            continue
+        if source.startswith("//", j) or (source[j] == "#" and not source.startswith("#[", j)):
+            nl = source.find("\n", j)
+            if nl == -1:
+                return "none", ""
+            j = nl + 1
+            continue
+        if source.startswith("/*", j):
+            end = source.find("*/", j + 2)
+            if end == -1:
+                return "none", ""
+            j = end + 2
+            continue
+        break
+    if j >= n:
+        return "none", ""
+    ch = source[j]
+    if ch.isascii() and (ch.isalpha() or ch == "_"):
+        end = j + 1
+        while end < n and source[end].isascii() and (source[end].isalnum() or source[end] == "_"):
+            end += 1
+        return "word", source[j:end]
+    return "symbol", ch
+
+
+def _line_comment_start(source: str, line_start: int, pos: int) -> int | None:
+    """Start of a `//` or `#` comment on this line that contains `pos`, if any."""
+    i = line_start
+    limit = pos + 1
+    in_squote = False
+    in_dquote = False
+    while i < limit:
+        ch = source[i]
+        if in_squote:
+            if ch == "\\" and i + 1 < limit:
+                i += 2
+                continue
+            if ch == "'":
+                in_squote = False
+            i += 1
+            continue
+        if in_dquote:
+            if ch == "\\" and i + 1 < limit:
+                i += 2
+                continue
+            if ch == '"':
+                in_dquote = False
+            i += 1
+            continue
+        if ch == "'":
+            in_squote = True
+            i += 1
+            continue
+        if ch == '"':
+            in_dquote = True
+            i += 1
+            continue
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            if end == -1 or end >= pos:
+                return i
+            i = end + 2
+            continue
+        if ch == "#" and not source.startswith("#[", i):
+            return i
+        if source.startswith("//", i):
+            return i
+        i += 1
+    return None
 
 
 def _read_ident(source: str, index: int) -> tuple[str, int] | None:
@@ -949,6 +1077,30 @@ def _payload_length(val: Value | None) -> int:
     return 0
 
 
+def _deletable_assignment(node) -> bool:
+    """True when deleting this assignment removes only that one write."""
+    parent = node.parent
+    if parent is None or parent.type != "expression_statement":
+        return False
+    if node.type == "assignment_expression":
+        right = node.child_by_field_name("right")
+        if right is not None and right.type in {
+            "assignment_expression",
+            "augmented_assignment_expression",
+        }:
+            return False
+    return True
+
+
+def _variable_patterns(encoded_name: bytes) -> list[re.Pattern[bytes]]:
+    name = re.escape(encoded_name)
+    return [
+        re.compile(rb"(?<![A-Za-z0-9_])\$(?:\{)?" + name + rb"(?![A-Za-z0-9_])"),
+        # `$GLOBALS['blob']` is the global `$blob` even when `$blob` itself is gone.
+        re.compile(rb"\$GLOBALS\s*\[\s*(?:'" + name + rb"'|\"" + name + rb"\"|" + name + rb")\s*\]"),
+    ]
+
+
 def _variable_referenced(source: str, name: str, skip: list[tuple[int, int]], extras: list[str]) -> bool:
     """True when `$name` survives outside the assignment and the spliced expression."""
     encoding = source_encoding(source)
@@ -956,20 +1108,21 @@ def _variable_referenced(source: str, name: str, skip: list[tuple[int, int]], ex
         encoded_name = name.encode(encoding)
     except UnicodeEncodeError:
         return True
-    pattern = re.compile(rb"(?<![A-Za-z0-9_])\$(?:\{)?" + re.escape(encoded_name) + rb"(?![A-Za-z0-9_])")
+    patterns = _variable_patterns(encoded_name)
     for extra in extras:
         try:
             blob = extra.encode(encoding)
         except UnicodeEncodeError:
             blob = extra.encode("utf-8", errors="replace")
-        if pattern.search(blob):
+        if any(pattern.search(blob) for pattern in patterns):
             return True
     data = source_bytes(source, encoding)
-    for match in pattern.finditer(data):
-        at = match.start()
-        if any(start <= at < end for start, end in skip):
-            continue
-        return True
+    for pattern in patterns:
+        for match in pattern.finditer(data):
+            at = match.start()
+            if any(start <= at < end for start, end in skip):
+                continue
+            return True
     return False
 
 
