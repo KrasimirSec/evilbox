@@ -738,10 +738,10 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         return elems[idx]
     recv = const_eval(obj, source, env)
     if recv is not None and isinstance(recv.py, str):
-        if idx < 0:
-            idx += len(recv.py)
+        # "hello"[-1] is undefined. It does not wrap to the last character.
         if 0 <= idx < len(recv.py):
             return Value(recv.py[idx])
+        return None
     if recv is not None and isinstance(recv.py, list):
         if 0 <= idx < len(recv.py):
             item = recv.py[idx]
@@ -794,7 +794,10 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if op == "-" and isinstance(val.py, (int, float)) and not isinstance(val.py, bool):
         return Value(-val.py)
     if op == "~" and isinstance(val.py, (int, float)) and not isinstance(val.py, bool):
-        return Value(~int(val.py))
+        n = _js_int32(val.py)
+        if n is None:
+            return None
+        return Value(~n)
     return None
 
 
@@ -851,7 +854,11 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if lv is None or rv is None or lv.splice_raw or rv.splice_raw:
         return None
     if op in {"^", "&", "|", "<<", ">>", ">>>"} and _is_num(lv.py) and _is_num(rv.py):
-        a, b = int(lv.py), int(rv.py)
+        a = _js_int32(lv.py)
+        b = _js_int32(rv.py)
+        if a is None or b is None:
+            return None
+        shift = b & 31
         if op == "^":
             return Value(a ^ b)
         if op == "&":
@@ -859,10 +866,10 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if op == "|":
             return Value(a | b)
         if op == "<<":
-            return Value(a << (b & 31))
+            return Value(_to_int32(a << shift))
         if op == ">>>":
-            return Value((a & 0xFFFFFFFF) >> (b & 31))
-        return Value(a >> (b & 31))
+            return Value(_to_uint32(a) >> shift)
+        return Value(a >> shift)
     if op in {"-", "*", "/", "%"} and _is_num(lv.py) and _is_num(rv.py):
         try:
             if op == "-":
@@ -873,11 +880,12 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
                 if rv.py == 0:
                     return None
                 result = lv.py / rv.py
-                if isinstance(lv.py, int) and isinstance(rv.py, int) and lv.py % rv.py == 0:
+                if isinstance(lv.py, int) and isinstance(rv.py, int) and _trunc_div_remainder(lv.py, rv.py) == 0:
                     return Value(lv.py // rv.py)
                 return Value(result)
             if op == "%":
-                return Value(lv.py % rv.py)
+                rem = _js_remainder(lv.py, rv.py)
+                return None if rem is None else Value(rem)
         except Exception:
             return None
     return None
@@ -885,6 +893,86 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
 def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not (isinstance(value, float) and math.isnan(value))
+
+
+def _to_int32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    if value >= 0x80000000:
+        value -= 0x100000000
+    return value
+
+
+def _to_uint32(value: int) -> int:
+    return value & 0xFFFFFFFF
+
+
+def _js_int32(value: Any) -> int | None:
+    """JavaScript ToInt32. Bitwise operators wrap, they do not use Python ints."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return 0
+        value = math.trunc(value)
+    return _to_int32(int(value))
+
+
+def _trunc_div_remainder(left: int, right: int) -> int:
+    """Remainder of division that truncates toward zero. Sign follows `left`."""
+    quot = abs(left) // abs(right)
+    if (left < 0) != (right < 0):
+        quot = -quot
+    return left - right * quot
+
+
+def _js_remainder(left: Any, right: Any) -> int | float | None:
+    """JavaScript `%`: truncated division, not Python's floor modulo."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return None
+    if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
+        return None
+    if isinstance(left, float) and (math.isnan(left) or math.isinf(left)):
+        return None
+    if isinstance(right, float) and (math.isnan(right) or math.isinf(right)):
+        return None
+    if right == 0:
+        return None
+    if isinstance(left, int) and isinstance(right, int):
+        return _trunc_div_remainder(left, right)
+    quot = math.trunc(float(left) / float(right))
+    return left - right * quot
+
+
+def _js_substring(text: str, values: list[Value]) -> Value | None:
+    """`String.prototype.substring`: negatives clamp to 0, and the ends swap."""
+    if not values or not _is_num(values[0].py):
+        return None
+    length = len(text)
+
+    def clamp(raw: Any) -> int | None:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        if isinstance(raw, float) and math.isnan(raw):
+            return 0
+        if isinstance(raw, float) and math.isinf(raw):
+            return 0 if raw < 0 else length
+        n = math.trunc(raw) if isinstance(raw, float) else int(raw)
+        if n < 0:
+            return 0
+        return length if n > length else n
+
+    start = clamp(values[0].py)
+    if start is None:
+        return None
+    if len(values) < 2 or not _is_num(values[1].py):
+        end = length
+    else:
+        end = clamp(values[1].py)
+        if end is None:
+            return None
+    if start > end:
+        start, end = end, start
+    return Value(text[start:end])
 
 
 def _js_truthy(value: Any) -> bool:
@@ -1182,6 +1270,8 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         if name in {"slice", "substring", "substr"}:
             if not values or not _is_num(values[0].py):
                 return None
+            if name == "substring":
+                return _js_substring(py, values)
             start = int(values[0].py)
             end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
             if name == "substr":

@@ -36,6 +36,67 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_int32_shift_selects_the_real_alphabet_letter():
+    src = """
+var alphabet = "abcdefghijklmnopqrstuvwxyz";
+var ch = alphabet[((305419896 << 8) | 255) % 26];
+"""
+    result = deobfuscate(src, language="js")
+    assert '"h"' in result.text
+    assert '"n"' not in result.text
+
+
+def test_js_signed_shift_and_uint_coercion_wrap():
+    signed = deobfuscate("var n = (4294967295 >> 0);", language="js")
+    assert "-1" in signed.text
+    assert "4294967295" not in signed.text
+    coerced = deobfuscate("var n = (4294967296 | 0);", language="js")
+    assert "4294967296" not in coerced.text
+    wide = deobfuscate('var s = String(1 << 31);', language="js")
+    assert "-2147483648" in wide.text
+    assert "2147483648" not in wide.text.replace("-2147483648", "")
+    unsigned = deobfuscate("var x = (-1 >>> 0);", language="js")
+    assert "4294967295" in unsigned.text
+
+
+def test_js_negative_remainder_does_not_invert_the_branch():
+    src = 'var msg = ((-5 % 2) === -1) ? "PAYLOAD" : "DECOY";'
+    result = deobfuscate(src, language="js")
+    compact = result.text.replace(" ", "")
+    assert "-1===-1" in compact
+    assert "1===-1" not in compact.replace("-1===-1", "")
+    other = deobfuscate("var n = (5 % -2);", language="js")
+    assert "n = 1" in other.text.replace("  ", " ")
+    assert "n = -1" not in other.text.replace("  ", " ")
+
+
+def test_js_negative_index_and_substring_are_not_python():
+    indexed = deobfuscate('var ch = "hello"[-1];', language="js")
+    assert '"o"' not in indexed.text
+    assert "[-1]" in indexed.text.replace(" ", "")
+    carved = deobfuscate(
+        'var a = "hello".substring(-1); var b = "hello".substring(3, 1);',
+        language="js",
+    )
+    assert '"hello"' in carved.text
+    assert '"el"' in carved.text
+    assert '"o"' not in carved.text
+
+
+def test_php_negative_remainder_does_not_invert_the_branch():
+    src = '<?php if ((-5 % 2) === -1) { echo "PAYLOAD"; } else { echo "DECOY"; }'
+    result = deobfuscate(src, language="php")
+    compact = result.text.replace(" ", "")
+    assert "-1===-1" in compact
+    assert "1===-1" not in compact.replace("-1===-1", "")
+    other = deobfuscate("<?php echo 5 % -2;", language="php")
+    assert "echo 1" in other.text
+    assert "echo -1" not in other.text
+    fractional = deobfuscate("<?php echo -5.9 % 2;", language="php")
+    assert "0.09" not in fractional.text
+    assert "-1" in fractional.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")
