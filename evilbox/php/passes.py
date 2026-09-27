@@ -1955,23 +1955,30 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
 
 
 def _read_local_file(target: str, env: FoldEnv | None) -> str | None:
-    if env is None:
+    """Read a file next to the sample. Paths are resolved before the containment check.
+
+    ``Path.relative_to`` treats ``/sample/dir/../../secret`` as inside ``/sample/dir``,
+    and ``is_file`` follows a symlink left in that directory. Both would inline host
+    files into the decoded source.
+    """
+    if env is None or not env.path or not target:
         return None
     from pathlib import Path
 
-    if env.path:
+    try:
         sample = Path(env.path).resolve()
+        root = sample.parent
         raw = Path(target)
-        if str(raw) == str(sample) or target.replace("\\", "/") == str(sample).replace("\\", "/"):
-            return env.original
-        try:
-            if not raw.is_absolute():
-                raw = (sample.parent / target).resolve()
-            raw.relative_to(sample.parent)
-        except (OSError, ValueError):
-            return None
-        if raw.is_file() and raw.stat().st_size <= 2 * 1024 * 1024:
-            return raw.read_text(encoding="latin-1", errors="replace")
+        if not raw.is_absolute():
+            raw = root / raw
+        resolved = raw.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if resolved == sample:
+        return env.original
+    if resolved.is_file() and resolved.stat().st_size <= 2 * 1024 * 1024:
+        return resolved.read_text(encoding="latin-1", errors="replace")
     return None
 
 

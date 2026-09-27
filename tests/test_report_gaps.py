@@ -65,6 +65,27 @@ def test_sibling_file_payload(tmp_path):
     assert "sibling-secret" in result.text
 
 
+def test_file_get_contents_cannot_escape_sample_dir(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host-secret-value", encoding="utf-8")
+    sample_dir = tmp_path / "nested" / "samples"
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "alias.txt").symlink_to(secret)
+    sample = sample_dir / "shell.php"
+    escaped = str(sample_dir) + "/../../secret.txt"
+    src = (
+        "<?php\n"
+        "$a = file_get_contents(__DIR__ . '/../../secret.txt');\n"
+        f"$b = file_get_contents('{escaped}');\n"
+        "$c = file_get_contents('../../secret.txt');\n"
+        "$d = file_get_contents(__DIR__ . '/alias.txt');\n"
+    )
+    sample.write_text(src, encoding="utf-8")
+    result = deobfuscate(src, language="php", path=str(sample))
+    assert "host-secret-value" not in result.text
+    assert "file_get_contents" in result.text
+
+
 def test_cluster_minhash_ignores_domain_and_key():
     a = deobfuscate('<?php $u = "http://evil.example/a"; eval($_POST["x"]);', language="php")
     b = deobfuscate('<?php $u = "http://other.example/b"; eval($_POST["x"]);', language="php")
