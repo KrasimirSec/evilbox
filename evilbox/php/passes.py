@@ -1954,6 +1954,30 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     return elems[idx]
 
 
+def _sample_text_is_open(sample, original: str | None) -> bool:
+    """True when `sample` is the file whose source is being decoded.
+
+    Callers such as the web UI pass an upload filename, not an opened file.
+    Treating that name as a sample path makes the process working directory
+    the sample directory and inlines local files into the decoded output.
+    """
+    if original is None:
+        return False
+    try:
+        if not sample.is_file():
+            return False
+        data = sample.read_bytes()
+    except OSError:
+        return False
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            if data.decode(encoding) == original:
+                return True
+        except UnicodeDecodeError:
+            continue
+    return False
+
+
 def _read_local_file(target: str, env: FoldEnv | None) -> str | None:
     if env is None:
         return None
@@ -1969,6 +1993,8 @@ def _read_local_file(target: str, env: FoldEnv | None) -> str | None:
                 raw = (sample.parent / target).resolve()
             raw.relative_to(sample.parent)
         except (OSError, ValueError):
+            return None
+        if not _sample_text_is_open(sample, env.original):
             return None
         if raw.is_file() and raw.stat().st_size <= 2 * 1024 * 1024:
             return raw.read_text(encoding="latin-1", errors="replace")

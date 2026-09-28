@@ -65,6 +65,31 @@ def test_sibling_file_payload(tmp_path):
     assert "sibling-secret" in result.text
 
 
+def test_unopened_path_does_not_inline_local_files(tmp_path, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("cwd-secret-marker", encoding="utf-8")
+    decoy = tmp_path / "shell.php"
+    decoy.write_text("<?php echo 'on-disk-shell';\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    pasted = "<?php echo file_get_contents('secret.txt');"
+    for path in ("shell.php", str(decoy), "secret.txt"):
+        result = deobfuscate(pasted, language="php", path=path)
+        assert "cwd-secret-marker" not in result.text
+        assert "on-disk-shell" not in result.text
+    via_dir = deobfuscate(
+        "<?php echo file_get_contents(__DIR__ . '/secret.txt');",
+        language="php",
+        path="shell.php",
+    )
+    assert "cwd-secret-marker" not in via_dir.text
+    via_file = deobfuscate(
+        "<?php echo file_get_contents(__FILE__);",
+        language="php",
+        path="shell.php",
+    )
+    assert "on-disk-shell" not in via_file.text
+
+
 def test_cluster_minhash_ignores_domain_and_key():
     a = deobfuscate('<?php $u = "http://evil.example/a"; eval($_POST["x"]);', language="php")
     b = deobfuscate('<?php $u = "http://other.example/b"; eval($_POST["x"]);', language="php")
