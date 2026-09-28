@@ -122,6 +122,36 @@ def test_api_decode_php_webshell_roles(web_url):
     assert "webshell" in roles
 
 
+def test_api_filename_does_not_read_cwd_files(web_url, tmp_path, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("cwd-secret-marker", encoding="utf-8")
+    (tmp_path / "shell.php").write_text("<?php echo 'on-disk-shell';\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    status, data = _post(
+        web_url,
+        {
+            "source": "<?php echo file_get_contents('secret.txt');",
+            "lang": "php",
+            "filename": "shell.php",
+        },
+    )
+    assert status == 200
+    assert data["ok"] is True
+    assert "cwd-secret-marker" not in data["decoded"]
+    assert "on-disk-shell" not in data["decoded"]
+    assert data["report"]["sample"]["path"] == "shell.php"
+    status, data = _post(
+        web_url,
+        {
+            "source": "<?php echo file_get_contents(__DIR__ . '/secret.txt');",
+            "lang": "php",
+            "filename": "secret.txt",
+        },
+    )
+    assert status == 200
+    assert "cwd-secret-marker" not in data["decoded"]
+
+
 def test_api_decode_plain_text_body(web_url):
     status, data = _post(
         web_url,
