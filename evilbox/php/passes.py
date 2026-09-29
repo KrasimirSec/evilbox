@@ -45,6 +45,7 @@ from evilbox.rewrite import (
     inside_loop,
     node_text,
     php_open_tag_length,
+    php_uses_html_grammar,
     reset_source_encoding,
     source_bytes,
     source_encoding,
@@ -184,8 +185,8 @@ def _repair_parser_gaps(source: str) -> tuple[str, list[str]]:
 
 
 def _starts_in_html(source: str) -> bool:
-    """Match parse_php: a `<?` tag selects the mixed HTML grammar."""
-    return source.lstrip().startswith("<?") or "<?" in source[:200]
+    """Match parse_php: only a real open tag selects the mixed HTML grammar."""
+    return php_uses_html_grammar(source)
 
 
 def _normalize_parser_gaps(source: str) -> str:
