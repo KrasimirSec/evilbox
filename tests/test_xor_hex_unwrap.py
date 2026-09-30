@@ -70,6 +70,41 @@ def test_php_hex2ascii_blob_unwrap():
     assert "hex-php-blob" in result.packer
 
 
+def test_php_hex_blob_keeps_live_statements():
+    payload = "echo 'webshell-ok';\n$auth_pass = 'secret';\n" + ("// pad\n" * 8)
+    hexed = payload.encode("latin-1").hex()
+    src = (
+        "<?php\n"
+        "$banner = 'SHOW-ME';\n"
+        f"$___ = '{hexed}';\n"
+        "function hex2ascii($p)\n"
+        "{\n"
+        "    $r = '';\n"
+        "    for ($i = 0; $i < strlen($p); $i += 2) {\n"
+        "        $r .= chr(hexdec($p[$i] . $p[$i + 1]));\n"
+        "    }\n"
+        "    return $r;\n"
+        "}\n"
+        "$critical = 'DO-NOT-DROP';\n"
+        "$__ = hex2ascii($___);\n"
+        "eval($__);\n"
+        "if ($critical !== 'DO-NOT-DROP') { exit('blocked'); }\n"
+        "echo $banner;\n"
+    )
+    text, notes = unwrap_hex_php_blob(src)
+    assert notes
+    assert "webshell-ok" in text
+    assert "DO-NOT-DROP" in text
+    assert "blocked" in text
+    assert "SHOW-ME" in text
+    assert "function hex2ascii" not in text
+    result = deobfuscate(src, language="php")
+    assert "webshell-ok" in result.text
+    assert "DO-NOT-DROP" in result.text
+    assert "blocked" in result.text
+    assert "SHOW-ME" in result.text
+
+
 def test_php_quoted_eval_gzinflate_print():
     inner = "echo 'quoted-payload';"
     blob = base64.b64encode(_raw_deflate(inner.encode("latin-1"))).decode("ascii")

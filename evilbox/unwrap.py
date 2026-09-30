@@ -260,10 +260,25 @@ _QUOTED_EVAL_RE = re.compile(
 )
 _HEX_ASSIGN_RE = re.compile(r"(\$\w+)\s*=\s*'([0-9a-fA-F]{80,})'\s*;", re.I)
 _HEX_HELPER_RE = re.compile(r"hex2ascii|hex2bin|pack\s*\(\s*['\"]H\*", re.I)
-_HEX_SINK_RE = re.compile(
-    r"(?:print\s*\(\s*\$\w+\s*\)|echo\s+\$\w+|@?eval\s*\(\s*\$\w+\s*\)|@?assert\s*\(\s*\$\w+\s*\))\s*;",
-    re.I,
+_HEX_HELPER_FN_RE = re.compile(r"^function\s+(?:hex2ascii|hex2bin)\b", re.I)
+_HEX_DERIVE_CALL_RE = re.compile(
+    r"^(\$\w+)\s*=\s*(?:hex2ascii|hex2bin)\s*\(\s*(\$\w+)\s*\)\s*;?$",
+    re.I | re.S,
 )
+_HEX_DERIVE_PACK_RE = re.compile(
+    r"""^(\$\w+)\s*=\s*pack\s*\(\s*(['"])H\*\2\s*,\s*(\$\w+)\s*\)\s*;?$""",
+    re.I | re.S,
+)
+_HEX_DERIVE_INTERP_RE = re.compile(
+    r'^(\$\w+)\s*=\s*"\{\s*(\$\w+)\s*\}"\s*;?$',
+    re.I | re.S,
+)
+_HEX_SINK_STMT_RE = re.compile(
+    r"^@?(?:eval|assert|print)\s*\(\s*(\$\w+)\s*\)\s*;?$",
+    re.I | re.S,
+)
+_HEX_ECHO_STMT_RE = re.compile(r"^echo\s+(\$\w+)\s*;?$", re.I | re.S)
+_HEX_WINDOW = 24_000
 
 
 def unwrap_quoted_eval_chain(source: str) -> tuple[str, list[str]]:
@@ -284,8 +299,107 @@ def unwrap_quoted_eval_chain(source: str) -> tuple[str, list[str]]:
     )
 
 
+def _skip_php_trivia(source: str, i: int) -> int:
+    n = len(source)
+    while i < n:
+        if source[i] in " \t\r\n":
+            i += 1
+            continue
+        if source[i] == "#" or source.startswith("//", i):
+            nl = source.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        break
+    return i
+
+
+def _php_statement_end(source: str, i: int) -> int | None:
+    """Index just past the statement that starts at ``i`` (not trivia)."""
+    n = len(source)
+    if re.match(r"(?:function|class)\b", source[i:], re.I):
+        brace = source.find("{", i)
+        if brace < 0:
+            return None
+        end = _match_brace(source, brace)
+        if end is None:
+            return None
+        return end + 1
+    paren = 0
+    j = i
+    while j < n:
+        ch = source[j]
+        if ch in "'\"":
+            j = _skip_php_string(source, j)
+            continue
+        if ch == "`":
+            end = source.find("`", j + 1)
+            j = n if end < 0 else end + 1
+            continue
+        if ch == "#" or (ch == "/" and j + 1 < n and source[j + 1] == "/"):
+            nl = source.find("\n", j)
+            j = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and j + 1 < n and source[j + 1] == "*":
+            end = source.find("*/", j + 2)
+            j = n if end < 0 else end + 2
+            continue
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            paren = max(0, paren - 1)
+        elif ch == "{" and paren == 0:
+            end = _match_brace(source, j)
+            if end is None:
+                return None
+            j = end + 1
+            nxt = _skip_php_trivia(source, j)
+            if re.match(r"(?:elseif|else)\b", source[nxt:], re.I):
+                j = nxt
+                continue
+            if re.match(r"while\b", source[nxt:], re.I) and re.match(r"do\b", source[i:], re.I):
+                j = nxt
+                continue
+            if nxt < n and source[nxt] == ";":
+                return nxt + 1
+            return j
+        elif ch == ";" and paren == 0:
+            return j + 1
+        j += 1
+    return None
+
+
+def _classify_hex_stmt(text: str, derived: set[str]) -> tuple[str, str | None]:
+    stripped = text.strip()
+    if not stripped:
+        return "skip", None
+    if _HEX_HELPER_FN_RE.match(stripped):
+        return "drop", None
+    for regex, arg_group in (
+        (_HEX_DERIVE_CALL_RE, 2),
+        (_HEX_DERIVE_PACK_RE, 3),
+        (_HEX_DERIVE_INTERP_RE, 2),
+    ):
+        match = regex.match(stripped)
+        if match and match.group(arg_group) in derived:
+            return "derive", match.group(1)
+    for regex in (_HEX_SINK_STMT_RE, _HEX_ECHO_STMT_RE):
+        match = regex.match(stripped)
+        if match and match.group(1) in derived:
+            return "sink", match.group(1)
+    return "live", None
+
+
 def unwrap_hex_php_blob(source: str) -> tuple[str, list[str]]:
-    """$p = 'hex...'; hex2ascii($p); print/eval — common WSO/hex wrappers."""
+    """$p = 'hex...'; hex2ascii($p); print/eval — common WSO/hex wrappers.
+
+    Only the hex assignment, the hex2ascii/hex2bin helper, and the assignments
+    that feed the decoded bytes into one eval/echo/print are removed. Later
+    sinks and any other statement in between stay in the file.
+    """
     best = None
     for match in _HEX_ASSIGN_RE.finditer(source):
         if best is None or len(match.group(2)) > len(best.group(2)):
@@ -295,21 +409,56 @@ def unwrap_hex_php_blob(source: str) -> tuple[str, list[str]]:
     decoded = hex_payload_to_text(best.group(2), min_bytes=48)
     if decoded is None or not looks_like_php_source(decoded):
         return source, []
-    rest = source[best.end() :]
-    if not _HEX_HELPER_RE.search(rest[:24_000]) and not _HEX_HELPER_RE.search(
+    if not _HEX_HELPER_RE.search(source[best.end() : best.end() + _HEX_WINDOW]) and not _HEX_HELPER_RE.search(
         source[max(0, best.start() - 400) : best.start()]
     ):
         return source, []
-    sink = None
-    for match in _HEX_SINK_RE.finditer(rest):
-        if match.end() <= 24_000:
-            sink = match
-    if sink is None:
+
+    derived = {best.group(1)}
+    live: list[tuple[int, int]] = []
+    limit = best.end() + _HEX_WINDOW
+    i = best.start()
+    sink_end: int | None = None
+    saw_assignment = False
+    while i < limit:
+        trivia = i
+        j = _skip_php_trivia(source, i)
+        if j >= limit or j >= len(source):
+            break
+        end = _php_statement_end(source, j)
+        if end is None or end <= j:
+            return source, []
+        if not saw_assignment:
+            if j != best.start() or end != best.end():
+                return source, []
+            saw_assignment = True
+            i = end
+            continue
+        kind, new_var = _classify_hex_stmt(source[j:end], derived)
+        if kind == "sink":
+            if end > limit:
+                return source, []
+            sink_end = end
+            break
+        if kind == "derive" and new_var:
+            derived.add(new_var)
+        elif kind == "live":
+            live.append((trivia, end))
+        i = end
+    if sink_end is None:
         return source, []
-    return (
-        source[: best.start()] + decoded + rest[sink.end() :],
-        ["Unwrapped hex2ascii PHP blob."],
-    )
+
+    parts = [source[: best.start()]]
+    for start, end in live:
+        parts.append(source[start:end])
+    if parts[-1] and not parts[-1].endswith("\n") and not decoded.startswith("\n"):
+        parts.append("\n")
+    parts.append(decoded)
+    tail = source[sink_end:]
+    if decoded and not decoded.endswith("\n") and tail and not tail.startswith("\n"):
+        parts.append("\n")
+    parts.append(tail)
+    return "".join(parts), ["Unwrapped hex2ascii PHP blob."]
 
 
 def unwrap_hex(source: str) -> tuple[str, list[str]]:
