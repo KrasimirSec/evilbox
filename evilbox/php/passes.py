@@ -638,6 +638,94 @@ def _ord_index_var(node, source: str) -> tuple[str, str, int | None] | None:
     return None
 
 
+def _zero_index_name(node, source: str) -> str | None:
+    """`$i = 0` in a for-loop initializer."""
+    if node is None or node.type != "assignment_expression":
+        return None
+    if not any(not child.is_named and child.type == "=" for child in node.children):
+        return None
+    named = [child for child in node.named_children]
+    if len(named) != 2:
+        return None
+    name = _php_var_name(named[0], source)
+    if name is None or named[1].type != "integer":
+        return None
+    try:
+        if int(node_text(source, named[1]), 0) != 0:
+            return None
+    except ValueError:
+        return None
+    return name
+
+
+def _steps_by_one(node, source: str, name: str) -> bool:
+    """`$i++`, `++$i`, or `$i += 1`."""
+    if node is None:
+        return False
+    if node.type == "update_expression":
+        var = next((child for child in node.named_children if child.type == "variable_name"), None)
+        if _php_var_name(var, source) != name:
+            return False
+        return any(not child.is_named and child.type == "++" for child in node.children)
+    if node.type != "augmented_assignment_expression":
+        return False
+    named = [child for child in node.named_children]
+    if len(named) != 2 or _php_var_name(named[0], source) != name or named[1].type != "integer":
+        return False
+    op_node = node.child_by_field_name("operator")
+    op = op_node.type if op_node is not None else ""
+    if op != "+=":
+        return False
+    try:
+        return int(node_text(source, named[1]), 0) == 1
+    except ValueError:
+        return False
+
+
+def _strlen_of(node, source: str, data_name: str) -> bool:
+    if node is None or node.type != "function_call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None or node_text(source, fn).lstrip("\\").lower() != "strlen":
+        return False
+    args = _call_args(node)
+    return len(args) == 1 and _php_var_name(args[0], source) == data_name
+
+
+class _NotABound:
+    pass
+
+
+_NOT_A_BOUND = _NotABound()
+
+
+def _xor_iteration_count(cond, source: str, index_name: str, data_name: str) -> int | None | _NotABound:
+    """How many bytes the loop reads.
+
+    An int is an explicit bound. None means `$i < strlen($data)`.
+    `_NOT_A_BOUND` means the condition is not a simple walk of that index.
+    """
+    if cond is None or cond.type != "binary_expression":
+        return _NOT_A_BOUND
+    op = _binary_op(cond, source)
+    left = cond.child_by_field_name("left")
+    right = cond.child_by_field_name("right")
+    if op not in {"<", "<="} or _php_var_name(left, source) != index_name or right is None:
+        return _NOT_A_BOUND
+    if op == "<" and _strlen_of(right, source, data_name):
+        return None
+    if right.type != "integer":
+        return _NOT_A_BOUND
+    try:
+        bound = int(node_text(source, right), 0)
+    except ValueError:
+        return _NOT_A_BOUND
+    if bound < 0:
+        return _NOT_A_BOUND
+    # `$i <= N` starting at 0 runs N + 1 times. Treating it as N drops the last byte.
+    return bound + 1 if op == "<=" else bound
+
+
 def _parse_xor_for(node, source: str) -> tuple[str, str, str, int | None] | None:
     if node.type != "for_statement":
         return None
@@ -645,14 +733,6 @@ def _parse_xor_for(node, source: str) -> tuple[str, str, str, int | None] | None
     body = node.child_by_field_name("body")
     if cond is None or body is None:
         return None
-    count: int | None = None
-    if cond.type == "binary_expression" and _binary_op(cond, source) in {"<", "<="}:
-        right = cond.child_by_field_name("right")
-        if right is not None and right.type == "integer":
-            try:
-                count = int(node_text(source, right), 0)
-            except ValueError:
-                count = None
     stmt = body
     if body.type == "compound_statement" and len(body.named_children) == 1:
         stmt = body.named_children[0]
@@ -678,8 +758,17 @@ def _parse_xor_for(node, source: str) -> tuple[str, str, str, int | None] | None
     right_ord = _ord_index_var(xor.child_by_field_name("right"), source)
     if left_ord is None or right_ord is None:
         return None
-    data_name, _, _ = left_ord
-    key_name, _, _ = right_ord
+    data_name, data_idx, _ = left_ord
+    key_name, key_idx, _ = right_ord
+    if data_idx != key_idx:
+        return None
+    if _zero_index_name(node.child_by_field_name("initialize"), source) != data_idx:
+        return None
+    if not _steps_by_one(node.child_by_field_name("update"), source, data_idx):
+        return None
+    count = _xor_iteration_count(cond, source, data_idx, data_name)
+    if isinstance(count, _NotABound):
+        return None
     return data_name, key_name, out_name, count
 
 
@@ -727,6 +816,35 @@ def _decoder_of_var(node, source: str, env: FoldEnv, out_name: str) -> str | Non
     if len(args) != 1 or _php_var_name(args[0], source) != out_name:
         return None
     return _call_name(arg, source, env)
+
+
+def _raw_out_sink(node, source: str, out_name: str) -> bool:
+    """True when the statement is eval/assert/echo/print of exactly `$out`."""
+    expr = _peel_php_expr(node)
+    if expr is None:
+        return False
+    if expr.type == "echo_statement":
+        named = [child for child in expr.named_children if child.type != "echo"]
+        if len(named) != 1:
+            return False
+        return _php_var_name(_peel_php_expr(named[0]), source) == out_name
+    if expr.type == "print_intrinsic":
+        named = list(expr.named_children)
+        if len(named) != 1:
+            return False
+        return _php_var_name(_peel_php_expr(named[0]), source) == out_name
+    if expr.type == "function_call_expression":
+        fn = expr.child_by_field_name("function")
+        if fn is None or node_text(source, fn).lstrip("\\").lower() not in {"eval", "assert"}:
+            return False
+        args = _call_args(expr)
+        if len(args) != 1:
+            return False
+        return _php_var_name(_peel_php_expr(args[0]), source) == out_name
+    if expr.type == "eval_expression":
+        arg = expr.named_children[0] if expr.named_children else None
+        return _php_var_name(_peel_php_expr(arg), source) == out_name
+    return False
 
 
 def _value_bytes(val: Value | None) -> bytes | None:
@@ -777,6 +895,8 @@ def _xor_loop_replacements(tree, source: str, env: FoldEnv) -> list[tuple[int, i
         if data is None or key is None:
             continue
         if count is not None:
+            if count > len(data):
+                continue
             data = data[:count]
         xored = xor_bytes(data, key)
         if xored is None:
@@ -793,8 +913,15 @@ def _xor_loop_replacements(tree, source: str, env: FoldEnv) -> list[tuple[int, i
             continue
         nxt = siblings[index + 1]
         decoder = _decoder_of_var(nxt, source, env, out_name)
+        # The following statement is deleted with the loop. Only do that when
+        # it is the eval/echo that consumes $out; a guard or other live code
+        # in that slot must stay.
+        if decoder is None and not _raw_out_sink(nxt, source, out_name):
+            continue
         payload = _apply_known_decoder(decoder, xored)
         if payload is None:
+            if decoder is not None:
+                continue
             payload = xored
         try:
             text = payload.decode("latin-1")

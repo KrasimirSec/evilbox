@@ -11,6 +11,47 @@ def _raw_deflate(data: bytes) -> bytes:
     return compressor.compress(data) + compressor.flush()
 
 
+def _xor_blob(plain: bytes, key: bytes) -> str:
+    xored = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(plain))
+    return "".join(f"\\x{byte:02x}" for byte in xored)
+
+
+def test_xor_loop_does_not_delete_the_next_live_statement():
+    plain = b"echo 'hi';"
+    key = b"k"
+    src = (
+        "<?php\n"
+        f"$data = \"{_xor_blob(plain, key)}\";\n"
+        "$key = 'k';\n"
+        "$out = '';\n"
+        f"for ($i = 0; $i < {len(plain)}; $i++)\n"
+        "    $out .= chr(ord($data[$i]) ^ ord($key[$i % 1]));\n"
+        "$keep = 'still-needed';\n"
+        "eval($out);\n"
+    )
+    result = deobfuscate(src, language="php")
+    assert "$keep = 'still-needed'" in result.text
+    assert "echo 'hi'" not in result.text
+    assert not any("XOR" in warning for warning in result.warnings)
+
+
+def test_xor_loop_inclusive_bound_keeps_last_byte():
+    plain = b"echo 'END';"
+    key = b"k"
+    last = len(plain) - 1
+    src = (
+        "<?php\n"
+        f"$data = \"{_xor_blob(plain, key)}\";\n"
+        "$key = 'k';\n"
+        "$out = '';\n"
+        f"for ($i = 0; $i <= {last}; $i++)\n"
+        "    $out .= chr(ord($data[$i]) ^ ord($key[$i % 1]));\n"
+        "eval($out);\n"
+    )
+    result = deobfuscate(src, language="php")
+    assert "echo 'END';" in result.text
+
+
 def test_php_repeating_xor_loop_eval():
     inner = "echo 'xor-unpacked';"
     compressed = _raw_deflate(inner.encode("latin-1"))
