@@ -106,6 +106,37 @@ var x = _0xf(0) + _0xf(1);
     assert "world" in result.text
 
 
+def test_js_postfix_rotate_counts_the_prefix_increment():
+    """`rot(++n); while (times--)` shifts one more time than `while (--times)`."""
+    src = """
+var _0x = ['a', 'b', 'c'];
+(function(a, n) {
+  var rot = function(times) {
+    while (times--) { a.push(a.shift()); }
+  };
+  rot(++n);
+})(_0x, 1);
+function _0xf(i) { i = i - 0; return _0x[i]; }
+var x = _0xf(0);
+"""
+    result = deobfuscate(src, language="js")
+    assert 'var x = "c"' in result.text
+
+    pre = """
+var _0x = ['a', 'b', 'c'];
+(function(a, n) {
+  var rot = function(times) {
+    while (--times) { a.push(a.shift()); }
+  };
+  rot(++n);
+})(_0x, 1);
+function _0xf(i) { i = i - 0; return _0x[i]; }
+var x = _0xf(0);
+"""
+    result = deobfuscate(pre, language="js")
+    assert 'var x = "b"' in result.text
+
+
 def test_js_decoder_with_offset():
     src = """
 var arr = ['aa', 'bb', 'cc'];
