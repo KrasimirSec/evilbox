@@ -36,6 +36,27 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_concat_uses_language_tostring():
+    src = """
+if (("" + !0) === "true") { real(); } else { decoy(); }
+if ((null + "") === "null") { keepNull(); } else { dropNull(); }
+if (("" + 1.0) === "1") { keepNum(); } else { dropNum(); }
+if (("" + 1e-7) === "1e-7") { keepExp(); } else { dropExp(); }
+var joined = [true, null, false].join("|");
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "real();" in result.text
+    assert "decoy" not in result.text
+    assert "keepNull();" in result.text
+    assert "dropNull" not in result.text
+    assert "keepNum();" in result.text
+    assert "dropNum" not in result.text
+    assert "keepExp();" in result.text
+    assert "dropExp" not in result.text
+    assert '"true||false"' in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")
