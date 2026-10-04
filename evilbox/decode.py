@@ -283,7 +283,13 @@ def bytes_to_text(data: bytes) -> str | None:
     return None
 
 
-def unescape_js_string_body(body: str) -> str:
+def unescape_js_string_body(body: str, *, octal_mask: int | None = None) -> str:
+    """Decode `\\n`, `\\xHH`, `\\u`, and octal escapes in a string body.
+
+    `\\0` is an octal escape, not a one-digit null. `\\072` is `:`, and `\\040`
+    is a space. PHP strings are bytes, so pass `octal_mask=0xFF` to wrap
+    `\\400` back to NUL.
+    """
     out: list[str] = []
     i = 0
     while i < len(body):
@@ -300,7 +306,6 @@ def unescape_js_string_body(body: str) -> str:
             "b": "\b",
             "f": "\f",
             "v": "\v",
-            "0": "\0",
             "\\": "\\",
             "'": "'",
             '"': '"',
@@ -335,7 +340,10 @@ def unescape_js_string_body(body: str) -> str:
             j = i + 1
             while j < len(body) and j < i + 4 and body[j] in "01234567":
                 j += 1
-            out.append(chr(int(body[i + 1 : j], 8)))
+            value = int(body[i + 1 : j], 8)
+            if octal_mask is not None:
+                value &= octal_mask
+            out.append(chr(value))
             i = j
             continue
         out.append(nxt)
@@ -352,7 +360,7 @@ def parse_quoted_string(literal: str) -> str | None:
     body = literal[1:-1]
     if quote == "'":
         return body.replace("\\'", "'").replace("\\\\", "\\")
-    return unescape_js_string_body(body)
+    return unescape_js_string_body(body, octal_mask=0xFF)
 
 
 def unescape_html_entities(text: str) -> str:
