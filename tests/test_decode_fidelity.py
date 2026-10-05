@@ -16,6 +16,7 @@ from evilbox.decode import (
     php_substr,
     raw_inflate,
     stripslashes,
+    unescape_js_string_body,
     uudecode_ex,
     xor_strings,
 )
@@ -24,6 +25,13 @@ from evilbox.phpdiff import php_binary, php_eval_json
 
 def _php_quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def test_js_line_continuation_drops_the_break():
+    assert unescape_js_string_body("ab\\\ncd", line_continuations=True) == "abcd"
+    assert unescape_js_string_body("ab\\\r\ncd", line_continuations=True) == "abcd"
+    assert unescape_js_string_body("ab\\\\\\" + "\ncd", line_continuations=True) == "ab\\cd"
+    assert unescape_js_string_body("ab\\\ncd") == "ab\ncd"
 
 
 def test_stripslashes_nul_and_trailing_backslash():

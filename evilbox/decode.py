@@ -67,7 +67,7 @@ def parse_js_quoted_string(literal: str) -> str | None:
     quote = literal[0]
     if quote not in "'\"" or literal[-1] != quote:
         return None
-    return unescape_js_string_body(literal[1:-1])
+    return unescape_js_string_body(literal[1:-1], line_continuations=True)
 
 
 def js_unescape(text: str) -> str:
@@ -283,7 +283,7 @@ def bytes_to_text(data: bytes) -> str | None:
     return None
 
 
-def unescape_js_string_body(body: str) -> str:
+def unescape_js_string_body(body: str, *, line_continuations: bool = False) -> str:
     out: list[str] = []
     i = 0
     while i < len(body):
@@ -293,6 +293,13 @@ def unescape_js_string_body(body: str) -> str:
             i += 1
             continue
         nxt = body[i + 1]
+        # JS deletes a backslash and the line terminator after it. PHP keeps both,
+        # so only JS string and template entry points set line_continuations.
+        if line_continuations and nxt in "\n\r\u2028\u2029":
+            i += 2
+            if nxt == "\r" and i < len(body) and body[i] == "\n":
+                i += 1
+            continue
         simple = {
             "n": "\n",
             "r": "\r",

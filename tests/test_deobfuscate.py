@@ -309,3 +309,37 @@ def test_fixture_php_eval_base64():
     assert result.language == "php"
     assert "echo" in result.text
     assert "hi" in result.text
+
+
+def test_js_line_continuation_keeps_the_live_url():
+    src = (
+        'var u = "http://evil.example/\\\n'
+        'payload";\n'
+        'if ("http://evil.example/\\\n'
+        'payload" === "http://evil.example/payload") { live(); } else { decoy(); }\n'
+    )
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "http://evil.example/payload" in result.text
+    assert "evil.example/\\n" not in result.text
+    assert "live" in result.text
+    assert "decoy" not in result.text
+
+
+def test_js_template_line_continuation_joins_the_url():
+    src = (
+        'if (`http://evil.example/\\\n'
+        'payload` === "http://evil.example/payload") { live(); } else { decoy(); }\n'
+    )
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "live" in result.text
+    assert "decoy" not in result.text
+
+
+def test_php_backslash_newline_stays_a_newline():
+    src = '<?php\n$u = "http://evil.example/\\\npayload";\necho $u;\n'
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert 'http://evil.example/\\\\\\npayload' in result.text or "http://evil.example/\\\n" in result.text
+    assert "http://evil.example/payload" not in result.text

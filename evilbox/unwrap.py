@@ -204,7 +204,7 @@ def _read_js_string(source: str, i: int) -> tuple[str | None, int]:
             i += 2
             continue
         if ch == quote:
-            return unescape_js_string_body("".join(chars)), i + 1
+            return unescape_js_string_body("".join(chars), line_continuations=True), i + 1
         chars.append(ch)
         i += 1
     return None, i
@@ -685,13 +685,13 @@ def _jjdecode(source: str) -> str | None:
         )
     if not match:
         return None
-    payload = unescape_js_string_body(match.group(1))
+    payload = unescape_js_string_body(match.group(1), line_continuations=True)
     if "function" in payload or "return" in payload or ";" in payload:
         return payload
     # Some encodings wrap return "..." 
     inner = re.match(r"""^return\s+["'](.*)["']\s*;?\s*$""", payload, re.S)
     if inner:
-        return unescape_js_string_body(inner.group(1))
+        return unescape_js_string_body(inner.group(1), line_continuations=True)
     if re.search(r"[A-Za-z_$][\w$]*\s*\(", payload):
         return payload
     return None
