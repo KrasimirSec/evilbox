@@ -109,6 +109,53 @@ echo '<input type="password" name="pwd" />';
     assert "dropper" not in {r.name for r in cls.roles}
 
 
+def test_js_substr_negative_length_keeps_the_empty_string():
+    src = 'var msg = ("hello".substr(1, -2) === "") ? "PAYLOAD" : "DECOY";'
+    result = deobfuscate(src, language="js")
+    assert "PAYLOAD" in result.text
+    assert "DECOY" not in result.text
+    plain = deobfuscate('var a = "hello".substr(0, -1);', language="js")
+    assert '""' in plain.text
+    assert "hell" not in plain.text
+
+
+def test_js_indexof_from_index_selects_the_later_slot():
+    src = 'var t = ["DECOY", "x", "y", "PAYLOAD"]; var s = t["abcabc".indexOf("abc", 1)];'
+    result = deobfuscate(src, language="js")
+    compact = result.text.replace(" ", "")
+    assert 's="PAYLOAD"' in compact
+    assert 's="DECOY"' not in compact
+    early = deobfuscate('var n = "hello".indexOf("h", -3);', language="js")
+    assert "n = 0" in early.text or "n=0" in early.text.replace(" ", "")
+
+
+def test_js_replace_substitution_keeps_the_matched_text():
+    src = 'var msg = ("foo".replace("o", "$&$&") === "fooo") ? "PAYLOAD" : "DECOY";'
+    result = deobfuscate(src, language="js")
+    assert "PAYLOAD" in result.text
+    assert "DECOY" not in result.text
+    patterns = deobfuscate(
+        'var a = "foo".replace("o", "$$");'
+        ' var b = "abc".replace("b", "$`");'
+        ' var c = "abc".replace("b", "$\'");'
+        ' var d = "ab".replaceAll("", "X");'
+        ' var e = "hello".replace("l", "L");',
+        language="js",
+    )
+    text = patterns.text
+    assert '"f$o"' in text
+    assert '"aac"' in text
+    assert '"acc"' in text
+    assert '"XaXbX"' in text
+    assert '"heLlo"' in text
+
+
+def test_js_string_method_infinity_does_not_crash():
+    src = 'var a = "hello".substr(0, 1e309); var b = "hello".charAt(1e309); keep();'
+    result = deobfuscate(src, language="js")
+    assert "keep()" in result.text
+
+
 def test_eval_dumps_are_separate_layers():
     original = "<?php eval($x);"
     dump1 = '<?php file_get_contents("http://first.example/a");'
