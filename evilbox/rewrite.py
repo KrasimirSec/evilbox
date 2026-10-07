@@ -95,6 +95,16 @@ def use_source_encoding(source: str):
     return _ENCODING.set(source_encoding(source))
 
 
+def use_utf8_encoding():
+    """parse_js offsets are into the UTF-8 form of the source.
+
+    Latin-1 is one byte per code point through U+00FF, so a decoded ``é`` makes
+    every later tree-sitter offset land one byte early and the rewrite cuts
+    through the next statement.
+    """
+    return _ENCODING.set("utf-8")
+
+
 def reset_source_encoding(token) -> None:
     _ENCODING.reset(token)
 

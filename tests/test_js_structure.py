@@ -245,3 +245,25 @@ console.log("payload");
     assert "gate" not in result.text
     assert "debugger" not in result.text
     assert "Removed self-defending wrapper" in result.warnings
+
+
+def test_js_non_ascii_does_not_shift_later_rewrites():
+    """A decoded U+00FF-or-below character is one Latin-1 byte and two UTF-8 bytes.
+
+    Structural edits after that character used to slice with the other encoding,
+    so `bar()` became `ar();;` and the whole pass was thrown away.
+    """
+    src = 'var s = "caf\\u00e9";\nfoo(), bar();\n'
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert 'var s = "café";' in result.text
+    assert "foo();\nbar();" in result.text
+    assert "foo()," not in result.text
+    assert not any("unparseable" in warning for warning in result.warnings)
+
+    folded = 'var x = String.fromCharCode(233);\nvar msg = "hello" + "world";\n'
+    result = deobfuscate(folded, language="js")
+    assert result.parse_ok
+    assert '"é"' in result.text
+    assert '"helloworld"' in result.text
+    assert not any("unparseable" in warning for warning in result.warnings)

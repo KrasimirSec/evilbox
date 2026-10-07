@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from evilbox.parsers import parse_js, parse_php
-from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, walk
+from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, use_utf8_encoding, walk
 
 WRAPPER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eval\s*\(\s*gzinflate\s*\(\s*base64_decode\s*\([^)]{0,80}", re.I),
@@ -273,7 +273,7 @@ def extract_surface(source: str, *, language: str) -> SurfaceSignatures:
                 continue
             add("identifier", name, "stable identifier in the original file")
 
-    token = use_source_encoding(source)
+    token = use_source_encoding(source) if language == "php" else use_utf8_encoding()
     try:
         tree = parse_php(source) if language == "php" else parse_js(source)
         for node in walk(tree.root_node):
