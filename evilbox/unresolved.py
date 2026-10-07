@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from evilbox.parsers import parse_js, parse_php
-from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, walk
+from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, use_utf8_encoding, walk
 
 PHP_DECODERS = frozenset(
     {
@@ -119,7 +119,7 @@ def _php_call_name(node, source: str) -> str | None:
 def scan_unresolved(source: str, *, language: str, layer: str) -> list[UnresolvedFold]:
     if not source:
         return []
-    token = use_source_encoding(source)
+    token = use_source_encoding(source) if language == "php" else use_utf8_encoding()
     try:
         found: list[UnresolvedFold] = []
         if language == "php":

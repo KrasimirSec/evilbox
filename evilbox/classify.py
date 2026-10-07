@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from evilbox.hashutil import minhash_hex, minhash_jaccard, minhash_values, sha256_text
 from evilbox.parsers import parse_js, parse_php
-from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, walk
+from evilbox.rewrite import node_text, reset_source_encoding, use_source_encoding, use_utf8_encoding, walk
 
 
 @dataclass
@@ -195,7 +195,7 @@ def _js_callee(node, source: str) -> str:
 
 def _walk_calls(text: str, language: str) -> list[tuple[str, int, int, str]]:
     """Return (callee, start, end, first_arg_text) for call-like nodes."""
-    token = use_source_encoding(text)
+    token = use_source_encoding(text) if language == "php" else use_utf8_encoding()
     out: list[tuple[str, int, int, str]] = []
     try:
         tree = parse_php(text) if language == "php" else parse_js(text)
@@ -232,7 +232,7 @@ def _walk_calls(text: str, language: str) -> list[tuple[str, int, int, str]]:
 
 
 def _string_regions(text: str, language: str) -> list[tuple[int, int]]:
-    token = use_source_encoding(text)
+    token = use_source_encoding(text) if language == "php" else use_utf8_encoding()
     spans: list[tuple[int, int]] = []
     try:
         tree = parse_php(text) if language == "php" else parse_js(text)
