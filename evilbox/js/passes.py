@@ -1189,6 +1189,14 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
                     start = max(len(py) + start, 0)
                 length = end
                 return Value(py[start:] if length is None else py[start : start + length])
+            if name == "substring":
+                # JS substring clamps each side to [0, len] and swaps when start > end.
+                n = len(py)
+                begin = min(max(start, 0), n)
+                finish = n if end is None else min(max(end, 0), n)
+                if begin > finish:
+                    begin, finish = finish, begin
+                return Value(py[begin:finish])
             return Value(py[start:end])
         if name == "split":
             sep = values[0].py if values and isinstance(values[0].py, str) else None
