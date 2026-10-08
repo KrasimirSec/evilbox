@@ -9,6 +9,20 @@ from evilbox.pipeline import deobfuscate
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_js_substring_clamps_and_swaps_before_branch_removal():
+    """substring(4, 0) is "hell", not the empty Python slice. The wrong value drops the live branch."""
+    swapped = """
+if ("hello".substring(4, 0) == "hell") { var live = "LIVE_PAYLOAD"; } else { var live = "DECOY"; }
+"""
+    negative = """
+if ("hello".substring(-2, 4) == "hell") { var live = "LIVE_PAYLOAD"; } else { var live = "DECOY"; }
+"""
+    for src in (swapped, negative):
+        result = deobfuscate(src, language="js")
+        assert "LIVE_PAYLOAD" in result.text
+        assert "DECOY" not in result.text
+
+
 def test_js_fromcharcode_and_concat():
     src = 'var x = String.fromCharCode(72,101,108,108,111) + " " + "world";'
     result = deobfuscate(src, language="js")
