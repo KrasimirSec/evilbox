@@ -36,6 +36,30 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_parseint_and_number_follow_language_rules():
+    """parseInt/Number used Python int/float, so the live branch was deleted or the decode crashed."""
+    src = """
+if (String(parseInt("1e2")) === "1") { keepExp(); } else { dropExp(); }
+if (String(parseInt(1e-7)) === "1") { keepTiny(); } else { dropTiny(); }
+if (String(parseInt(1e-6)) === "0") { keepMilli(); } else { dropMilli(); }
+if (String(parseInt(1e21)) === "1") { keepSci(); } else { dropSci(); }
+if (String(parseInt("16px")) === "16") { keepPx(); } else { dropPx(); }
+if (String(parseInt(1e-6, 16)) === "0") { keepHex(); } else { dropHex(); }
+if (String(Number("1.5")) === "1.5") { keepNum(); } else { dropNum(); }
+if (String(Number(1.5)) === "1.5") { keepLit(); } else { dropLit(); }
+var crashed = parseInt("Infinity");
+var also = parseInt(1e309);
+var huge = Number("1e309");
+keepAfter();
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    for name in ("keepExp", "keepTiny", "keepMilli", "keepSci", "keepPx", "keepHex", "keepNum", "keepLit", "keepAfter"):
+        assert f"{name}();" in result.text
+    for name in ("dropExp", "dropTiny", "dropMilli", "dropSci", "dropPx", "dropHex", "dropNum", "dropLit"):
+        assert name not in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")

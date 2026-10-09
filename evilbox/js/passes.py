@@ -975,7 +975,10 @@ def _from_char_code(values: list[Value]) -> Value | None:
 
 def _js_int(value: Any, radix: int | None = None) -> int | None:
     if _is_num(value):
-        return int(value)
+        try:
+            return int(value)
+        except OverflowError:
+            return None
     if isinstance(value, str):
         text = value.strip()
         try:
@@ -985,9 +988,181 @@ def _js_int(value: Any, radix: int | None = None) -> int | None:
         except ValueError:
             try:
                 return int(float(text))
-            except ValueError:
+            except (ValueError, OverflowError):
                 return None
     return None
+
+
+def _js_parse_int_radix(value: Any) -> int | None:
+    """ToInt32 of a parseInt radix. None means the radix is not a plain integer."""
+    if isinstance(value, bool):
+        number = 1 if value else 0
+    elif value is None:
+        number = 0
+    elif isinstance(value, float) and not math.isfinite(value):
+        number = 0
+    elif _is_num(value):
+        try:
+            number = int(value)
+        except OverflowError:
+            number = 0
+    elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip() or ""):
+        try:
+            number = int(value.strip(), 10)
+        except ValueError:
+            return None
+    else:
+        return None
+    number %= 2**32
+    if number >= 2**31:
+        number -= 2**32
+    return number
+
+
+def _js_float(value: int | float) -> float | None:
+    """The IEEE value JavaScript uses for this number. None if it is non-finite."""
+    if isinstance(value, bool) or not _is_num(value):
+        return None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    as_float = float(value)
+    return as_float if math.isfinite(as_float) else None
+
+
+def _js_number_to_string(value: int | float) -> str:
+    """JavaScript ToString for a finite number."""
+    number = _js_float(value)
+    if number is None:
+        if isinstance(value, float) and math.isnan(value):
+            return "NaN"
+        if (isinstance(value, float) and value < 0) or (isinstance(value, int) and value < 0):
+            return "-Infinity"
+        return "Infinity"
+    if number == 0:
+        return "0"
+    sign = "-" if number < 0 else ""
+    mag = abs(number)
+    try:
+        exp = math.floor(math.log10(mag))
+    except ValueError:
+        return "0"
+    # Decimal when the scientific exponent is in [-6, 20]; otherwise 1.23e+21.
+    if -6 <= exp <= 20:
+        if mag >= 1:
+            try:
+                whole = int(mag)
+            except OverflowError:
+                return "Infinity"
+            frac = mag - whole
+            text = str(whole)
+            if frac:
+                digits = format(frac, ".16f")[2:].rstrip("0")
+                if digits:
+                    text += "." + digits
+            return sign + text
+        zeros = -exp - 1
+        scaled = mag * (10 ** (zeros + 1))
+        if scaled >= 10:
+            scaled /= 10
+            zeros -= 1
+        digits = format(scaled, ".15f")
+        if digits.startswith("10"):
+            digits = "1" + digits[2:]
+        digits = digits.replace(".", "").lstrip("0").rstrip("0") or "0"
+        return sign + "0." + ("0" * max(zeros, 0)) + digits
+    sig = mag / (10**exp)
+    if sig >= 10:
+        sig /= 10
+        exp += 1
+    elif sig < 1:
+        sig *= 10
+        exp -= 1
+    mantissa = format(sig, ".15f").rstrip("0").rstrip(".")
+    if mantissa == "10":
+        mantissa = "1"
+        exp += 1
+    exp_sign = "+" if exp >= 0 else "-"
+    return f"{sign}{mantissa}e{exp_sign}{abs(exp)}"
+
+
+def _js_parse_int(value: Any, radix: int | None) -> int | None:
+    """JavaScript parseInt. None means NaN, which is left unfolded."""
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, bool):
+        text = "true" if value else "false"
+    elif value is None:
+        text = "null"
+    elif _is_num(value):
+        text = _js_number_to_string(value)
+    else:
+        return None
+    if radix is not None and radix != 0 and not 2 <= radix <= 36:
+        return None
+    base = 10 if radix in {None, 0} else radix
+    if not text:
+        return None
+    sign = 1
+    if text[0] in "+-":
+        sign = -1 if text[0] == "-" else 1
+        text = text[1:]
+    if (radix in {None, 0, 16}) and len(text) >= 2 and text[0] == "0" and text[1] in "xX":
+        base = 16
+        text = text[2:]
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    allowed = digits[:base]
+    match = re.match(r"[0-9A-Za-z]+", text)
+    if match is None:
+        return None
+    token = match.group(0).lower()
+    cut = 0
+    while cut < len(token) and token[cut] in allowed:
+        cut += 1
+    prefix = token[:cut]
+    if not prefix:
+        return None
+    try:
+        return sign * int(prefix, base)
+    except ValueError:
+        return None
+
+
+def _js_to_number(value: Any) -> int | float | None:
+    """JavaScript ToNumber for Number(). None means NaN or a non-finite result."""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value is None:
+        return 0
+    if _is_num(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, float) and value.is_integer() and abs(value) >= 1e21:
+            return None
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text == "":
+        return 0
+    body = text[1:] if text[0] in "+-" else text
+    if body[:2].lower() in {"0x", "0o", "0b"}:
+        if text[0] in "+-":
+            return None
+        try:
+            return int(body, 0)
+        except ValueError:
+            return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    if number.is_integer() and abs(number) >= 1e21:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
 
 
 def _decode_array_item(item: Value, encoding: str, values: list[Value]) -> Value | None:
@@ -1108,19 +1283,16 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return None
 
     if obj == "parseInt" and prop is None and values:
-        radix = _js_int(values[1].py) if len(values) > 1 else None
-        parsed = _js_int(values[0].py, radix)
+        radix = None
+        if len(values) > 1:
+            radix = _js_parse_int_radix(values[1].py)
+            if radix is None:
+                return None
+        parsed = _js_parse_int(values[0].py, radix)
         return Value(parsed) if parsed is not None else None
     if obj == "Number" and prop is None and values:
-        parsed = _js_int(values[0].py)
-        if parsed is not None:
-            return Value(parsed)
-        if isinstance(values[0].py, str):
-            try:
-                return Value(float(values[0].py))
-            except ValueError:
-                return None
-        return None
+        parsed = _js_to_number(values[0].py)
+        return Value(parsed) if parsed is not None else None
     if obj == "String" and prop is None and values:
         py = values[0].py
         if isinstance(py, bool):
