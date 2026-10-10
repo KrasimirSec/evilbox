@@ -36,6 +36,37 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_php_str_replace_uses_language_rules():
+    shredded = '<?php echo str_replace("", "X", "PAYLOAD");'
+    result = deobfuscate(shredded, language="php")
+    assert "PAYLOAD" in result.text
+    assert "XPXA" not in result.text
+
+    short = '<?php echo str_replace(array("a", "b", "c"), array("X"), "abc");'
+    result = deobfuscate(short, language="php")
+    assert "'X'" in result.text
+    assert "XXX" not in result.text
+
+    crashed = '<?php echo str_replace(array("a", "b"), array(), "ab"); live();'
+    result = deobfuscate(crashed, language="php")
+    assert "live" in result.text
+    assert "''" in result.text or '""' in result.text
+
+    folded = '<?php echo str_ireplace(array("A", "B"), array("X"), "ab");'
+    result = deobfuscate(folded, language="php")
+    assert "'X'" in result.text
+    assert "XX" not in result.text
+
+    reused = '<?php echo str_replace(array("a", "b"), "Z", "ab");'
+    result = deobfuscate(reused, language="php")
+    assert "'ZZ'" in result.text
+
+    skipped = '<?php echo str_replace(array("a", "", "b"), array("X", "Y", "Z"), "ab");'
+    result = deobfuscate(skipped, language="php")
+    assert "'XZ'" in result.text
+    assert "Y" not in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")
