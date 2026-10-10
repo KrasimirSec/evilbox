@@ -1611,12 +1611,25 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         repls = as_list(values[1])
         if searches is None or repls is None:
             return None
+        # A string replacement is reused for every search. An array pairs by
+        # index, and PHP fills the missing tail with "" — not the last element.
+        # An empty search is a no-op; Python would insert between every character.
+        replace_each = not isinstance(values[1].py, list)
+        if replace_each and not repls:
+            return None
         out = subject
-        flags = re.I if name == "str_ireplace" else 0
+        ignore_case = name == "str_ireplace"
         for index, search in enumerate(searches):
-            repl = repls[index] if index < len(repls) else repls[-1]
-            if name == "str_ireplace":
-                out = re.compile(re.escape(search), flags).sub(lambda _m, r=repl: r, out)
+            if search == "":
+                continue
+            if replace_each:
+                repl = repls[0]
+            elif index < len(repls):
+                repl = repls[index]
+            else:
+                repl = ""
+            if ignore_case:
+                out = re.compile(re.escape(search), re.I).sub(lambda _m, r=repl: r, out)
             else:
                 out = out.replace(search, repl)
         return Value(out)
