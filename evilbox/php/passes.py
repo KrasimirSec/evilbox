@@ -1402,6 +1402,32 @@ def _call_args(node):
     return out
 
 
+def _php_strtr_map(hay: str, pairs: list[tuple[str, str]]) -> str:
+    """PHP ``strtr($hay, $map)``.
+
+    At each offset the longest key wins. The replacement is not searched, and
+    the scan advances by the key's length. An empty key matches every offset
+    and would loop, so it is ignored the way PHP ignores it.
+    """
+    ordered = [(src, dst) for src, dst in pairs if src]
+    ordered.sort(key=lambda item: len(item[0]), reverse=True)
+    if not ordered:
+        return hay
+    out: list[str] = []
+    index = 0
+    limit = len(hay)
+    while index < limit:
+        for src, dst in ordered:
+            if hay.startswith(src, index):
+                out.append(dst)
+                index += len(src)
+                break
+        else:
+            out.append(hay[index])
+            index += 1
+    return "".join(out)
+
+
 def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     name = _call_name(node, source, env)
     if not name:
@@ -1546,16 +1572,21 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             mapping = values[1].py
             if isinstance(mapping, list):
                 return None
-            out = hay
-            items = list(mapping.items())
-            items.sort(key=lambda kv: -len(str(kv[0])))
-            for key, item in items:
-                src = key if isinstance(key, str) else _as_php_string(key)
+            pairs: list[tuple[str, str]] = []
+            for key, item in mapping.items():
+                if isinstance(key, str):
+                    src = key
+                elif isinstance(key, bool):
+                    src = "1" if key else "0"
+                elif isinstance(key, int):
+                    src = str(key)
+                else:
+                    return None
                 dst = as_str(item if isinstance(item, Value) else Value(item))
                 if dst is None:
                     return None
-                out = out.replace(src, dst)
-            return Value(out)
+                pairs.append((src, dst))
+            return Value(_php_strtr_map(hay, pairs))
         if len(values) >= 3:
             frm = as_str(values[1])
             to = as_str(values[2])
