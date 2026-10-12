@@ -22,9 +22,12 @@ def test_launcher_retries_a_half_created_venv():
     assert "creating local environment" in text
 
 
-def test_project_is_pyproject_only():
+def test_setup_py_shim_exists_for_old_pip():
     assert (ROOT / "pyproject.toml").is_file()
-    assert not (ROOT / "setup.py").exists()
+    setup = (ROOT / "setup.py").read_text(encoding="utf-8")
+    assert "python_requires" in setup
+    assert ">=3.10" in setup
+    assert "find_packages" in setup
     assert LAUNCHER.is_file()
     assert LAUNCHER.stat().st_mode & 0o111
 
@@ -41,3 +44,6 @@ def test_launcher_requires_python_310():
     assert "tree-sitter-javascript 0.23+" in text
     assert "rm -rf" in text
     assert "EVILBOX_PYTHON" in text
+    assert "deadsnakes" in text
+    assert "uv python install" in text
+    assert "uv venv" in text

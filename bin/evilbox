@@ -31,6 +31,15 @@ find_python() {
       return 0
     fi
   done
+  if command -v uv >/dev/null 2>&1; then
+    for ver in 3.14 3.13 3.12 3.11 3.10; do
+      found=$(uv python find "$ver" 2>/dev/null) || continue
+      if [ -n "$found" ] && [ -x "$found" ] && py_ok "$found"; then
+        printf '%s\n' "$found"
+        return 0
+      fi
+    done
+  fi
   return 1
 }
 
@@ -39,7 +48,12 @@ need_python_msg() {
   if command -v python3 >/dev/null 2>&1; then
     echo "error: python3 is $(py_ver python3)" >&2
   fi
-  echo "error: install Python 3.10+ (Debian/Ubuntu: sudo apt install python3.10 python3.10-venv) and re-run." >&2
+  echo "error: default apt often has no python3.10 package. Use the deadsnakes PPA or uv:" >&2
+  echo "error:   sudo apt install software-properties-common" >&2
+  echo "error:   sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update" >&2
+  echo "error:   sudo apt install python3.10 python3.10-venv" >&2
+  echo "error: or: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  echo "error:     uv python install 3.12 && uv venv .venv --python 3.12" >&2
 }
 
 install_evilbox() {
@@ -64,14 +78,20 @@ fi
 
 if [ ! -x "$PY" ]; then
   PYTHON=$(find_python) || PYTHON=""
-  if [ -z "$PYTHON" ]; then
+  if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
+    echo "evilbox: no Python 3.10+ on PATH; installing 3.12 with uv..." >&2
+    uv python install 3.12
+    uv venv "$VENV" --python 3.12
+    PYTHON=""
+  elif [ -z "$PYTHON" ]; then
     need_python_msg
     exit 2
-  fi
-  echo "evilbox: creating local environment (once) with $PYTHON ($(py_ver "$PYTHON"))..." >&2
-  if ! "$PYTHON" -m venv "$VENV"; then
-    echo "error: failed to create $VENV with $PYTHON. On Debian/Ubuntu install the matching venv package (python3.10-venv / python3.12-venv)." >&2
-    exit 2
+  else
+    echo "evilbox: creating local environment (once) with $PYTHON ($(py_ver "$PYTHON"))..." >&2
+    if ! "$PYTHON" -m venv "$VENV"; then
+      echo "error: failed to create $VENV with $PYTHON. On Debian/Ubuntu install the matching venv package (python3.10-venv / python3.12-venv)." >&2
+      exit 2
+    fi
   fi
   install_evilbox
 elif [ ! -f "$STAMP" ]; then

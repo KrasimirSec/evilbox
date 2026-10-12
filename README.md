@@ -6,7 +6,33 @@ It does **not** execute the input in a JS or PHP engine. The optional Docker lab
 
 ## Install
 
-Needs **Python 3.10+**. The environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it. `bin/evilbox` prefers `python3.12` / `python3.11` / `python3.10` if `python3` is older. Distro Python 3.8/3.9 cannot install `tree-sitter-javascript>=0.23` (pip only offers 0.21.x). The launcher upgrades pip inside the venv first so `pip install -e` works from `pyproject.toml` alone (distro pip 20/21 otherwise errors with `setup.py not found`). If a previous attempt left a half-created `.venv`, run `bin/evilbox` again — it finishes the install. A `.venv` built with Python 3.8/3.9 must be deleted after you install 3.10+.
+Needs **Python 3.10+**. The environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it. `bin/evilbox` prefers `python3.12` / `python3.11` / `python3.10` if `python3` is older. Distro Python 3.8/3.9 cannot install `tree-sitter-javascript>=0.23` (pip only offers 0.21.x). Default Ubuntu/Debian apt often has **no** `python3.10` package — do not expect `sudo apt install python3.10` to work.
+
+Get a 3.10+ interpreter, then delete any half-created `.venv` and re-run `bin/evilbox`:
+
+```bash
+# Ubuntu: deadsnakes (when the distro python is 3.8/3.9)
+sudo apt install software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.10 python3.10-venv
+rm -rf .venv
+bin/evilbox
+```
+
+```bash
+# Any Linux, no extra apt Python packages
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+rm -rf .venv
+uv python install 3.12
+uv venv .venv --python 3.12
+.venv/bin/python -m pip install --upgrade pip setuptools wheel
+.venv/bin/python -m pip install -e .
+bin/evilbox
+```
+
+The launcher upgrades pip inside the venv first. A `setup.py` shim is there so pip 20/21 can still do `pip install -e` (those versions otherwise error with `setup.py not found` on a pyproject-only tree). If a previous attempt left a half-created `.venv`, run `bin/evilbox` again — it finishes the install. A `.venv` built with Python 3.8/3.9 must be deleted after you install 3.10+.
 
 From this project folder:
 
