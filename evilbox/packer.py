@@ -24,6 +24,10 @@ _HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("setTimeout-string", re.compile(r"\b(?:setTimeout|setInterval)\s*\(\s*['\"]", re.I)),
     ("computed-fromCharCode", re.compile(r"""String\s*\[\s*['\"]fromCharCode['\"]\s*\]""")),
     ("fromCharCode", re.compile(r"fromCharCode\s*\(")),
+    ("atob-xor-iife", re.compile(
+        r"atob\s*\(\s*\w+\s*\)[\s\S]{0,400}fromCharCode\s*\([\s\S]{0,120}charCodeAt[\s\S]{0,80}\^",
+        re.I,
+    )),
     ("hex-escape", re.compile(r"(?:\\x[0-9a-fA-F]{2}){8,}")),
     ("unicode-escape", re.compile(r"(?:\\u[0-9a-fA-F]{4}){8,}")),
     ("chr-chain", re.compile(r"(?:chr\s*\(\s*\d+\s*\)\s*\.\s*){4,}chr\s*\(", re.I)),
