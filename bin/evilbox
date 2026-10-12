@@ -4,9 +4,98 @@ set -e
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
+STAMP="$VENV/.evilbox-ready"
+
+py_ok() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null
+}
+
+py_ver() {
+  "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || printf '%s\n' unknown
+}
+
+find_python() {
+  if [ -n "${EVILBOX_PYTHON:-}" ]; then
+    if [ -x "$EVILBOX_PYTHON" ] || command -v "$EVILBOX_PYTHON" >/dev/null 2>&1; then
+      if py_ok "$EVILBOX_PYTHON"; then
+        printf '%s\n' "$EVILBOX_PYTHON"
+        return 0
+      fi
+    fi
+    echo "error: EVILBOX_PYTHON=$EVILBOX_PYTHON is not Python 3.10+" >&2
+    return 1
+  fi
+  for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cand" >/dev/null 2>&1 && py_ok "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  if command -v uv >/dev/null 2>&1; then
+    for ver in 3.14 3.13 3.12 3.11 3.10; do
+      found=$(uv python find "$ver" 2>/dev/null) || continue
+      if [ -n "$found" ] && [ -x "$found" ] && py_ok "$found"; then
+        printf '%s\n' "$found"
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+need_python_msg() {
+  echo "error: evilbox needs Python 3.10 or newer (tree-sitter-javascript 0.23+ has no builds for 3.8/3.9)." >&2
+  if command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 is $(py_ver python3)" >&2
+  fi
+  echo "error: default apt often has no python3.10 package. Use the deadsnakes PPA or uv:" >&2
+  echo "error:   sudo apt install software-properties-common" >&2
+  echo "error:   sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update" >&2
+  echo "error:   sudo apt install python3.10 python3.10-venv" >&2
+  echo "error: or: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  echo "error:     uv python install 3.12 && uv venv .venv --python 3.12" >&2
+}
+
+install_evilbox() {
+  if ! "$PY" -m pip --version >/dev/null 2>&1; then
+    "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+  # Distro venvs often ship pip < 21.3, which cannot do editable installs from
+  # pyproject.toml and errors with "setup.py not found".
+  "$PY" -m pip install -q --upgrade pip setuptools wheel
+  if ! "$PY" -m pip install -q -e "$ROOT"; then
+    echo "evilbox: editable install unavailable; installing a copy of this tree" >&2
+    "$PY" -m pip install -q "$ROOT"
+  fi
+  touch "$STAMP"
+}
+
+if [ -x "$PY" ] && ! py_ok "$PY"; then
+  echo "error: .venv is Python $(py_ver "$PY"); evilbox needs 3.10+." >&2
+  echo "error: delete .venv (rm -rf \"$VENV\") after installing Python 3.10+, then re-run bin/evilbox." >&2
+  exit 2
+fi
+
 if [ ! -x "$PY" ]; then
-  echo "evilbox: creating local environment (once)..." >&2
-  python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q -e "$ROOT"
+  PYTHON=$(find_python) || PYTHON=""
+  if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
+    echo "evilbox: no Python 3.10+ on PATH; installing 3.12 with uv..." >&2
+    uv python install 3.12
+    uv venv "$VENV" --python 3.12
+    PYTHON=""
+  elif [ -z "$PYTHON" ]; then
+    need_python_msg
+    exit 2
+  else
+    echo "evilbox: creating local environment (once) with $PYTHON ($(py_ver "$PYTHON"))..." >&2
+    if ! "$PYTHON" -m venv "$VENV"; then
+      echo "error: failed to create $VENV with $PYTHON. On Debian/Ubuntu install the matching venv package (python3.10-venv / python3.12-venv)." >&2
+      exit 2
+    fi
+  fi
+  install_evilbox
+elif [ ! -f "$STAMP" ]; then
+  echo "evilbox: finishing local environment..." >&2
+  install_evilbox
 fi
 exec "$PY" -m evilbox "$@"
