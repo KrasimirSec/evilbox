@@ -27,3 +27,17 @@ def test_project_is_pyproject_only():
     assert not (ROOT / "setup.py").exists()
     assert LAUNCHER.is_file()
     assert LAUNCHER.stat().st_mode & 0o111
+
+
+def test_launcher_requires_python_310():
+    text = LAUNCHER.read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'requires-python = ">=3.10"' in pyproject
+    assert "tree-sitter-javascript>=0.23" in pyproject
+    assert "python3.12" in text
+    assert "python3.11" in text
+    assert "python3.10" in text
+    assert "sys.version_info >= (3, 10)" in text
+    assert "tree-sitter-javascript 0.23+" in text
+    assert "rm -rf" in text
+    assert "EVILBOX_PYTHON" in text

@@ -6,7 +6,7 @@ It does **not** execute the input in a JS or PHP engine. The optional Docker lab
 
 ## Install
 
-The Python environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it. The launcher upgrades pip inside that venv first so `pip install -e` works from `pyproject.toml` alone (distro pip 20/21 otherwise errors with `setup.py not found`). If a previous attempt left a half-created `.venv`, run `bin/evilbox` again — it finishes the install.
+Needs **Python 3.10+**. The environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it. `bin/evilbox` prefers `python3.12` / `python3.11` / `python3.10` if `python3` is older. Distro Python 3.8/3.9 cannot install `tree-sitter-javascript>=0.23` (pip only offers 0.21.x). The launcher upgrades pip inside the venv first so `pip install -e` works from `pyproject.toml` alone (distro pip 20/21 otherwise errors with `setup.py not found`). If a previous attempt left a half-created `.venv`, run `bin/evilbox` again — it finishes the install. A `.venv` built with Python 3.8/3.9 must be deleted after you install 3.10+.
 
 From this project folder:
 
