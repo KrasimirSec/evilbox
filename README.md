@@ -6,7 +6,7 @@ It does **not** execute the input in a JS or PHP engine. The optional Docker lab
 
 ## Install
 
-The Python environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it.
+The Python environment lives in `.venv` and is created **automatically** the first time you run the tool. You do not activate it. The launcher upgrades pip inside that venv first so `pip install -e` works from `pyproject.toml` alone (distro pip 20/21 otherwise errors with `setup.py not found`). If a previous attempt left a half-created `.venv`, run `bin/evilbox` again — it finishes the install.
 
 From this project folder:
 
