@@ -135,6 +135,7 @@ class FoldEnv:
     concat_rhs: dict[ScopeKey, object] = field(default_factory=dict)
     concat_extra: dict[ScopeKey, list] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    overlay: dict[str, Value] | None = None
 
     def key(self, node, name: str) -> ScopeKey:
         return (enclosing_function_id(node), name)
@@ -653,7 +654,31 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(None)
     if t == "identifier" and env is not None:
         name = node_text(source, node)
+        if env.overlay is not None and name in env.overlay:
+            return env.overlay[name]
         return env.scalars.get(env.key(node, name))
+    if t == "member_expression":
+        obj = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        if obj is None or prop is None:
+            return None
+        prop_name = node_text(source, prop)
+        recv = const_eval(obj, source, env)
+        if recv is None:
+            return None
+        if prop_name == "length" and isinstance(recv.py, (str, list)):
+            return Value(len(recv.py))
+        return None
+    if t == "ternary_expression":
+        cond = node.child_by_field_name("condition")
+        cons = node.child_by_field_name("consequence")
+        alt = node.child_by_field_name("alternative")
+        if cond is None or cons is None or alt is None:
+            return None
+        test = const_eval(cond, source, env)
+        if test is None:
+            return None
+        return const_eval(cons if _js_truthy(test.py) else alt, source, env)
     if t == "parenthesized_expression":
         inner = node.named_children[0] if node.named_children else None
         return const_eval(inner, source, env) if inner is not None else None
@@ -884,6 +909,29 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
                 return Value(lv.py % rv.py)
         except Exception:
             return None
+    if op in {"<", ">", "<=", ">="}:
+        cmp = _ordered_compare(op, lv.py, rv.py)
+        if cmp is None:
+            return None
+        return Value(cmp)
+    return None
+
+
+def _ordered_compare(op: str, left: Any, right: Any) -> bool | None:
+    if _is_num(left) and _is_num(right):
+        a, b = left, right
+    elif isinstance(left, str) and isinstance(right, str):
+        a, b = left, right
+    else:
+        return None
+    if op == "<":
+        return a < b
+    if op == ">":
+        return a > b
+    if op == "<=":
+        return a <= b
+    if op == ">=":
+        return a >= b
     return None
 
 
@@ -1220,8 +1268,9 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         methoded = _eval_method(recv, prop or "", values)
         if methoded is not None:
             return methoded
-    _ = from_cc
-    return None
+    from evilbox.js.interp import interpret_js_iife
+
+    return interpret_js_iife(node, values, source, env)
 
 
 def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:

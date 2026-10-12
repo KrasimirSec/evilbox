@@ -190,6 +190,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - String XOR and repeating-key `xor` / `rc4` when the key is a constant in the same file
 - Repeating-XOR `for` loops of the form `$out .= chr(ord($data[$i]) ^ ord($key[$i % K]))` followed by `eval` / `assert` / `print` of `gzinflate` / `base64_decode` / similar
 - JS: `atob` + repeating-key XOR IIFE (`String.fromCharCode(x.charCodeAt(i) ^ k.charCodeAt(i % k.length))`), including `return r.split("|")` URL lists
+- Bounded interpreter for constant JS IIFEs and PHP anonymous functions / `for` / `while` loops whose inputs are constants. Loop bodies fold when they only use ops already modeled (`atob`, `fromCharCode`, `chr` / `ord`, arithmetic, `+=` / `.=`, `push` / `join`). Caps: 200k steps, 2 MiB. Not a JS/PHP engine: unknown calls, DOM, `eval` of non-constants, and `foreach` abort. Top-level loops that do not feed `eval` / `assert` stay in the source.
 - Quoted `print` / `echo` of a string that is itself `eval(gzinflate(base64_decode(...)))`
 - Custom `hex2ascii` / hex-blob wrappers (`$p = '24617574…'; print(hex2ascii($p))`)
 - `chr` / `ord` chains, `sprintf` / `implode` / `str_replace` / `substr` / `strtr`
@@ -220,7 +221,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 
 `gzinflate` / `gzuncompress` / `gzdecode` / `bzdecompress` output is capped at 2 MiB. Incomplete streams are refused (no unbounded `flush()`).
 
-PHP constant folding is **assigned-once per function**, matching the JS `assign_count` rule. A later `$a = 'strrev'` does not rewrite an earlier `$a('aGVsbG8=')`. Straight-line `$s .= ...` / JS `s += ...` chains fold; assignments inside `for` / `foreach` / `while` or `if` / `switch` do not. Variables touched by `global`, references, `extract`, `compact`, `parse_str`, or `foreach` are skipped.
+PHP constant folding is **assigned-once per function**, matching the JS `assign_count` rule. A later `$a = 'strrev'` does not rewrite an earlier `$a('aGVsbG8=')`. Straight-line `$s .= ...` / JS `s += ...` chains fold. Assignments inside `for` / `foreach` / `while` or `if` / `switch` are not rewritten in place; a bounded interpreter may still compute the result of a constant function or of a loop that feeds `eval`. Variables touched by `global`, references, `extract`, `compact`, `parse_str`, or `foreach` are skipped.
 
 Codecs that model PHP strings (`~`, XOR, `stripslashes`, `substr`, `strrev`, `ord`, `strtr`, `strtoupper`) treat values as **bytes** (latin-1). Characters above U+00FF are an error, not replaced with `?`. HTML entities that unescape outside latin-1 (`&rsquo;`, `&inodot;`) are left as entities so a rewrite cannot emit non-byte text. `scan_unresolved` and other AST walks encode the file the same way it was parsed (latin-1 for 8-bit PHP). `convert_uudecode` line-padding retries are marked **recovered**. `substr` past the end of the string follows the selected `--php-version` (empty string on PHP 8, `false` on PHP 5/7). Integer-looking floats stringify as PHP does (`6.0` → `6`). Shifts of 63 bits or more, and integers wider than 256 bits, are left unfolded.
 
