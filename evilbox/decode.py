@@ -610,6 +610,60 @@ def xor_bytes(data: bytes, key: bytes) -> bytes | None:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 
+def repeating_xor_text(blob: str, key: str, *, use_atob: bool = True) -> str | None:
+    """Decode a repeating-key XOR of latin-1 bytes, optionally after atob/base64."""
+    if not blob or not key:
+        return None
+    if use_atob:
+        data = b64decode(blob)
+        if data is None:
+            return None
+    else:
+        data = blob.encode("latin-1")
+    xored = xor_bytes(data, key.encode("latin-1"))
+    if xored is None:
+        return None
+    text = bytes_to_text(xored)
+    if text is not None:
+        return text
+    return xored.decode("latin-1")
+
+
+def xor_plaintext_score(text: str) -> int:
+    """Prefer URL lists and printable text when guessing blob vs key order."""
+    if not text:
+        return 0
+    score = 0
+    if "https://" in text or "http://" in text:
+        score += 4
+    if "|" in text:
+        score += 1
+    printable = sum(1 for ch in text if ch.isprintable() or ch in "\n\r\t")
+    if printable / len(text) > 0.9:
+        score += 2
+    if any(ch.isalpha() for ch in text):
+        score += 1
+    return score
+
+
+def pick_repeating_xor_text(
+    blob: str,
+    key: str,
+    *,
+    use_atob: bool = True,
+    swapped_ok: bool = True,
+) -> str | None:
+    """XOR `blob` with repeating `key`; optionally try the swapped pair."""
+    text = repeating_xor_text(blob, key, use_atob=use_atob)
+    if swapped_ok:
+        alt = repeating_xor_text(key, blob, use_atob=use_atob)
+        if alt is not None and (text is None or xor_plaintext_score(alt) > xor_plaintext_score(text)):
+            text = alt
+    if text and xor_plaintext_score(text) >= 2:
+        return text
+    return None
+
+
 def xor_strings(left: str, right: str) -> str:
     a = php_string_bytes(left)
     b = php_string_bytes(right)

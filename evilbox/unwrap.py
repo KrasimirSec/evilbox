@@ -11,8 +11,11 @@ from evilbox.decode import (
     bytes_to_text,
     gzip_zlib_or_inflate,
     hex_payload_to_text,
+    js_quote,
     looks_like_php_source,
+    parse_js_quoted_string,
     pas_recover_payload,
+    pick_repeating_xor_text,
     unescape_js_string_body,
 )
 
@@ -89,7 +92,208 @@ def unwrap_source(source: str, language: str = "js") -> tuple[str, list[str]]:
         warnings.extend(notes)
         text, notes = unwrap_aaencode(text)
         warnings.extend(notes)
+        text, notes = unwrap_js_atob_xor(text)
+        warnings.extend(notes)
     return text, warnings
+
+
+_FN_IIFE_HEAD = re.compile(r"function\s*\(")
+
+
+def unwrap_js_atob_xor(source: str) -> tuple[str, list[str]]:
+    """Fold `(function(b,k){ atob; fromCharCode(charCodeAt ^ …); split })(blob, key)`."""
+    if "fromCharCode" not in source or "charCodeAt" not in source or "^" not in source:
+        return source, []
+    replacements: list[tuple[int, int, str]] = []
+    for match in _FN_IIFE_HEAD.finditer(source):
+        span = _js_atob_xor_span(source, match.start())
+        if span is None:
+            continue
+        start, end, rendered = span
+        if any(start < existing[1] and end > existing[0] for existing in replacements):
+            continue
+        replacements.append((start, end, rendered))
+    if not replacements:
+        return source, []
+    text = source
+    for start, end, rendered in reversed(replacements):
+        text = text[:start] + rendered + text[end:]
+    note = "Unwrapped atob+XOR IIFE."
+    if "atob" not in source:
+        note = "Unwrapped repeating-XOR IIFE."
+    return text, [note]
+
+
+def _js_atob_xor_span(source: str, fn_at: int) -> tuple[int, int, str] | None:
+    start = fn_at
+    wrapped = False
+    j = fn_at - 1
+    while j >= 0 and source[j].isspace():
+        j -= 1
+    if j >= 0 and source[j] == "(":
+        start = j
+        wrapped = True
+    param_open = source.find("(", fn_at)
+    if param_open < 0:
+        return None
+    param_end = _match_balanced(source, param_open)
+    if param_end is None:
+        return None
+    i = _skip_js_ws(source, param_end)
+    if i >= len(source) or source[i] != "{":
+        return None
+    body_end = _match_balanced(source, i)
+    if body_end is None:
+        return None
+    body = source[i:body_end]
+    compact = re.sub(r"\s+", "", body)
+    if "fromCharCode" not in compact or "charCodeAt" not in compact or "^" not in compact:
+        return None
+    if "%256" in compact:
+        return None
+    use_atob = "atob" in compact
+    i = _skip_js_ws(source, body_end)
+    if wrapped and i < len(source) and source[i] == ")":
+        i = _skip_js_ws(source, i + 1)
+    if i >= len(source) or source[i] != "(":
+        return None
+    parsed_args = _read_two_js_string_args(source, i)
+    if parsed_args is None:
+        return None
+    blob, key, args_end = parsed_args
+    end = args_end
+    k = _skip_js_ws(source, args_end)
+    if wrapped and k < len(source) and source[k] == ")":
+        end = k + 1
+    params = _simple_js_param_names(source[param_open + 1 : param_end - 1])
+    mapped_blob, mapped_key = blob, key
+    mapped = False
+    atob_arg = re.search(r"\batob\s*\(\s*([A-Za-z_$][\w$]*)\s*\)", body)
+    if use_atob and atob_arg and atob_arg.group(1) in params:
+        idx = params.index(atob_arg.group(1))
+        args = [blob, key]
+        if idx < len(args):
+            mapped_blob = args[idx]
+            mapped_key = args[1 - idx] if len(args) == 2 else key
+            mapped = True
+    text = pick_repeating_xor_text(
+        mapped_blob, mapped_key, use_atob=use_atob, swapped_ok=not mapped
+    )
+    if not text:
+        return None
+    split_m = re.search(r"\.split\s*\(\s*(['\"])(.*?)\1\s*\)", body)
+    if split_m:
+        rendered = "[" + ", ".join(js_quote(part) for part in text.split(split_m.group(2))) + "]"
+    else:
+        rendered = js_quote(text)
+    return start, end, rendered
+
+
+def _simple_js_param_names(text: str) -> list[str]:
+    names: list[str] = []
+    for part in text.split(","):
+        name = part.strip()
+        if "=" in name:
+            name = name.split("=", 1)[0].strip()
+        if re.match(r"^[A-Za-z_$][\w$]*$", name):
+            names.append(name)
+    return names
+
+
+def _skip_js_ws(text: str, i: int) -> int:
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n":
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        break
+    return i
+
+
+def _match_balanced(text: str, open_index: int) -> int | None:
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    opener = text[open_index] if open_index < len(text) else ""
+    closer = pairs.get(opener)
+    if closer is None:
+        return None
+    depth = 0
+    i = open_index
+    in_str: str | None = None
+    escape = False
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            in_str = ch
+            i += 1
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _read_js_string(text: str, i: int) -> tuple[str, int] | None:
+    i = _skip_js_ws(text, i)
+    if i >= len(text) or text[i] not in "'\"":
+        return None
+    quote = text[i]
+    j = i + 1
+    escape = False
+    while j < len(text):
+        ch = text[j]
+        if escape:
+            escape = False
+        elif ch == "\\":
+            escape = True
+        elif ch == quote:
+            parsed = parse_js_quoted_string(text[i : j + 1])
+            if parsed is None:
+                return None
+            return parsed, j + 1
+        j += 1
+    return None
+
+
+def _read_two_js_string_args(text: str, open_paren: int) -> tuple[str, str, int] | None:
+    first = _read_js_string(text, open_paren + 1)
+    if first is None:
+        return None
+    s0, i = first
+    i = _skip_js_ws(text, i)
+    if i >= len(text) or text[i] != ",":
+        return None
+    second = _read_js_string(text, i + 1)
+    if second is None:
+        return None
+    s1, i = second
+    end = _match_balanced(text, open_paren)
+    if end is None:
+        return None
+    return s0, s1, end
 
 
 def unwrap_dean_edwards(source: str) -> tuple[str, list[str]]:

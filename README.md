@@ -189,6 +189,7 @@ Still static: no JS/PHP engine. Nested codec expressions fold in one pass when e
 - Nested chains such as `eval(gzinflate(base64_decode(str_rot13(...))))`
 - String XOR and repeating-key `xor` / `rc4` when the key is a constant in the same file
 - Repeating-XOR `for` loops of the form `$out .= chr(ord($data[$i]) ^ ord($key[$i % K]))` followed by `eval` / `assert` / `print` of `gzinflate` / `base64_decode` / similar
+- JS: `atob` + repeating-key XOR IIFE (`String.fromCharCode(x.charCodeAt(i) ^ k.charCodeAt(i % k.length))`), including `return r.split("|")` URL lists
 - Quoted `print` / `echo` of a string that is itself `eval(gzinflate(base64_decode(...)))`
 - Custom `hex2ascii` / hex-blob wrappers (`$p = '24617574…'; print(hex2ascii($p))`)
 - `chr` / `ord` chains, `sprintf` / `implode` / `str_replace` / `substr` / `strtr`

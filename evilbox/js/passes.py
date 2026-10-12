@@ -14,6 +14,7 @@ from evilbox.decode import (
     js_unescape,
     parse_js_quoted_string,
     percent_decode,
+    pick_repeating_xor_text,
     rc4_crypt,
     unescape_html_entities,
     unescape_js_string_body,
@@ -133,6 +134,7 @@ class FoldEnv:
     decoders: dict[str, DecoderInfo] = field(default_factory=dict)
     concat_rhs: dict[ScopeKey, object] = field(default_factory=dict)
     concat_extra: dict[ScopeKey, list] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def key(self, node, name: str) -> ScopeKey:
         return (enclosing_function_id(node), name)
@@ -204,7 +206,7 @@ def _fold_js(source: str) -> tuple[str, list[str]]:
             replacements.append((node.start_byte, node.end_byte, rendered))
     text = apply_replacements(source, replacements)
     text = _rename_junk(text)
-    return text, []
+    return text, list(env.warnings)
 
 
 def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
@@ -264,6 +266,8 @@ def collect_env(tree, source: str) -> FoldEnv:
         item = const_eval(value, source, env)
         if item is not None and not item.splice_raw:
             env.scalars[key] = item
+            if isinstance(item.py, list):
+                env.arrays[key] = item.py
             env.concat_rhs[key] = value
             env.concat_extra[key] = []
 
@@ -1025,6 +1029,65 @@ def _eval_new(node, source: str, env: FoldEnv | None = None) -> Value | None:
     return None
 
 
+def _eval_xor_iife(node, source: str, values: list[Value], env: FoldEnv | None) -> Value | None:
+    if len(values) < 2:
+        return None
+    fn = node.child_by_field_name("function")
+    if fn is None and node.named_children:
+        fn = node.named_children[0]
+    while fn is not None and fn.type == "parenthesized_expression" and fn.named_children:
+        fn = fn.named_children[0]
+    if fn is None or fn.type not in {"function_expression", "arrow_function"}:
+        return None
+    body = node_text(source, fn)
+    compact = re.sub(r"\s+", "", body)
+    if "fromCharCode" not in compact or "charCodeAt" not in compact or "^" not in compact:
+        return None
+    if "%256" in compact:
+        return None
+    use_atob = "atob" in compact
+    params = _function_param_names(fn, source)
+    blob: str | None = None
+    key: str | None = None
+    mapped = False
+    atob_arg = re.search(r"\batob\s*\(\s*([A-Za-z_$][\w$]*)\s*\)", body)
+    if use_atob and atob_arg and atob_arg.group(1) in params:
+        idx = params.index(atob_arg.group(1))
+        if idx < len(values) and isinstance(values[idx].py, str):
+            blob = values[idx].py
+        for i, name in enumerate(params):
+            if i == idx or i >= len(values) or not isinstance(values[i].py, str):
+                continue
+            if f"{name}.charCodeAt" in compact or (name + "[") in compact:
+                key = values[i].py
+                break
+        if key is None:
+            for i, val in enumerate(values):
+                if i != idx and isinstance(val.py, str) and val.py:
+                    key = val.py
+                    break
+        mapped = blob is not None and key is not None
+    if blob is None or key is None:
+        strs = [v.py for v in values if isinstance(v.py, str) and v.py]
+        if len(strs) < 2:
+            return None
+        blob, key = strs[0], strs[1]
+    text = pick_repeating_xor_text(blob, key, use_atob=use_atob, swapped_ok=not mapped)
+    if not text:
+        return None
+    split_m = re.search(r"\.split\s*\(\s*(['\"])(.*?)\1\s*\)", body)
+    if split_m:
+        parts = text.split(split_m.group(2))
+        result = Value([Value(part) for part in parts])
+    else:
+        result = Value(text)
+    if env is not None:
+        note = "Unwrapped atob+XOR IIFE." if use_atob else "Unwrapped repeating-XOR IIFE."
+        if note not in env.warnings:
+            env.warnings.append(note)
+    return result
+
+
 def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     args = _call_args(node)
     values: list[Value] = []
@@ -1033,6 +1096,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if val is None:
             return None
         values.append(val)
+
+    iife = _eval_xor_iife(node, source, values, env)
+    if iife is not None:
+        return iife
 
     obj, prop, recv = _callee(node, source, env)
 
