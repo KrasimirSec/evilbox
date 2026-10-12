@@ -103,4 +103,7 @@ def test_js_xor_iife_skips_rc4_percent_256():
         "r+=String.fromCharCode(b.charCodeAt(0)^n);return r;})(\"QQ==\",\"k3\");"
     )
     result = deobfuscate(src, language="js")
-    assert "QQ==" in result.text or "% 256" in result.text or "charCodeAt" in result.text
+    # Repeating-XOR unwrap must not treat the whole blob as ciphertext. A
+    # one-byte constant IIFE may still interpret (Q ^ (k % 256) == ":").
+    assert "https://" not in result.text
+    assert "QQ==" in result.text or ":" in result.text or "charCodeAt" in result.text

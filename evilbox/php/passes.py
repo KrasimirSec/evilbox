@@ -104,6 +104,7 @@ class FoldEnv:
     path: str | None = None
     original: str | None = None
     warnings: list[str] = field(default_factory=list)
+    overlay: dict[str, Value] | None = None
 
     def key(self, node, name: str) -> ScopeKey:
         return (enclosing_function_id(node), name)
@@ -133,6 +134,11 @@ class FoldEnv:
         if self._track_reads and key not in self._read_keys:
             self._read_keys.append(key)
         return last[1]
+
+    def lookup(self, node, name: str) -> Value | None:
+        if self.overlay is not None and name in self.overlay:
+            return self.overlay[name]
+        return self.reaching(node, name)
 
     def note_assignment(self, source: str, node, name: str, *, append: bool) -> None:
         key = self.key(node, name)
@@ -481,6 +487,9 @@ def transform_php(
         env.original = original if original is not None else source
         replacements: list[tuple[int, int, str]] = list(_concat_collapse_replacements(source, env, php_quote))
         replacements.extend(_xor_loop_replacements(tree, source, env))
+        from evilbox.php.interp import php_loop_replacements
+
+        replacements.extend(php_loop_replacements(tree, source, env))
         for node in walk(tree.root_node):
             rendered = _render_if_simplified(node, source, env)
             if rendered is None:
@@ -1133,7 +1142,7 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(None)
     if t == "variable_name" and env is not None:
         name = node_text(source, node).lstrip("$")
-        return env.reaching(node, name)
+        return env.lookup(node, name)
     if t == "dynamic_variable_name" and env is not None:
         inner = next((c for c in node.named_children if c.type == "variable_name"), None)
         if inner is None:
@@ -1339,6 +1348,29 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
                 return Value(lv.py % rv.py)
         except Exception:
             return None
+    if op in {"<", ">", "<=", ">="}:
+        cmp = _ordered_compare(op, lv.py, rv.py)
+        if cmp is None:
+            return None
+        return Value(cmp)
+    return None
+
+
+def _ordered_compare(op: str, left: Any, right: Any) -> bool | None:
+    if _is_num(left) and _is_num(right):
+        a, b = left, right
+    elif isinstance(left, str) and isinstance(right, str):
+        a, b = left, right
+    else:
+        return None
+    if op == "<":
+        return a < b
+    if op == ">":
+        return a > b
+    if op == "<=":
+        return a <= b
+    if op == ">=":
+        return a >= b
     return None
 
 
@@ -1367,7 +1399,7 @@ def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
     if fn.type == "variable_name":
         if env is None:
             return None
-        val = env.reaching(fn, node_text(source, fn).lstrip("$"))
+        val = env.lookup(fn, node_text(source, fn).lstrip("$"))
         if val is not None and isinstance(val.py, str):
             return val.py.lstrip("\\").lower()
         return None
@@ -1403,9 +1435,11 @@ def _call_args(node):
 
 
 def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
-    name = _call_name(node, source, env)
-    if not name:
-        return None
+    fn = node.child_by_field_name("function")
+    if fn is None and node.named_children:
+        fn = node.named_children[0]
+    while fn is not None and fn.type == "parenthesized_expression" and fn.named_children:
+        fn = fn.named_children[0]
     args = _call_args(node)
     values: list[Value] = []
     for arg in args:
@@ -1413,6 +1447,14 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if val is None:
             return None
         values.append(val)
+    if fn is not None and fn.type in {"anonymous_function", "arrow_function"}:
+        from evilbox.php.interp import interpret_php_function
+
+        return interpret_php_function(fn, values, source, env)
+
+    name = _call_name(node, source, env)
+    if not name:
+        return None
 
     def as_bytes(val: Value) -> bytes | None:
         if isinstance(val.py, bytes):
@@ -1537,6 +1579,17 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
     if name == "chr" and values and _is_num(values[0].py):
         return Value(chr(int(values[0].py) & 0xFF))
+
+    if name in {"strlen", "mb_strlen"} and values:
+        s = as_str(values[0])
+        if s is None and isinstance(values[0].py, bytes):
+            return Value(len(values[0].py))
+        return Value(len(s)) if s is not None else None
+    if name in {"count", "sizeof"} and values:
+        py = values[0].py
+        if isinstance(py, (list, dict, str, bytes)):
+            return Value(len(py))
+        return None
 
     if name == "strtr" and values:
         hay = as_str(values[0])
@@ -1925,7 +1978,7 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     if idx_val is None:
         return None
     name = node_text(source, obj).lstrip("$") if obj.type == "variable_name" else None
-    reached = env.reaching(obj, name) if env is not None and name else None
+    reached = env.lookup(obj, name) if env is not None and name else None
     if isinstance(idx_val.py, str) and reached is not None and isinstance(reached.py, dict):
         item = reached.py.get(idx_val.py)
         return item if isinstance(item, Value) or item is None else Value(item)
