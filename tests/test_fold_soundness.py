@@ -109,6 +109,41 @@ echo '<input type="password" name="pwd" />';
     assert "dropper" not in {r.name for r in cls.roles}
 
 
+def test_js_decode_uri_preserves_reserved_and_utf8():
+    reserved = """
+if (decodeURI("http%3A%2F%2Fevil.test%2Fa") === "http%3A%2F%2Fevil.test%2Fa") { real(); } else { decoy(); }
+if (decodeURI("ok%41%3D") === "okA%3D") { keepEq(); } else { dropEq(); }
+var path = decodeURI("a%20b%2Fc");
+"""
+    result = deobfuscate(reserved, language="js")
+    assert result.parse_ok
+    assert "real();" in result.text
+    assert "decoy" not in result.text
+    assert "keepEq();" in result.text
+    assert "dropEq" not in result.text
+    assert "a b%2Fc" in result.text
+    assert "a b/c" not in result.text
+    assert "http://evil.test" not in result.text
+
+    component = 'var url = decodeURIComponent("http%3A%2F%2Fevil.test%2Fa");'
+    decoded = deobfuscate(component, language="js")
+    assert 'url = "http://evil.test/a"' in decoded.text
+    assert "decodeURIComponent" not in decoded.text
+
+    utf8 = 'var ch = decodeURIComponent("%C3%A9");'
+    folded = deobfuscate(utf8, language="js")
+    assert folded.parse_ok
+    assert 'ch = "é"' in folded.text
+    assert "Ã©" not in folded.text
+    assert "decodeURIComponent" not in folded.text
+
+    broken = 'var broken = decodeURIComponent("%ZZ");'
+    left = deobfuscate(broken, language="js")
+    compact = left.text.replace(" ", "")
+    assert 'broken=decodeURIComponent("%ZZ")' in compact
+    assert 'broken="%ZZ"' not in compact
+
+
 def test_eval_dumps_are_separate_layers():
     original = "<?php eval($x);"
     dump1 = '<?php file_get_contents("http://first.example/a");'
