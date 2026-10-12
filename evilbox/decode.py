@@ -397,6 +397,75 @@ def percent_decode(text: str) -> str | None:
         return None
 
 
+# decodeURI does not unescape characters encodeURI would have left alone.
+_URI_RESERVED = frozenset(";/?:@&=+$,#")
+
+
+def js_decode_uri(text: str, *, component: bool) -> str | None:
+    """JavaScript decodeURI / decodeURIComponent.
+
+    Escapes are UTF-8, and a malformed sequence throws URIError, so this
+    returns None instead of a partial string. decodeURI keeps reserved
+    characters percent-encoded; decodeURIComponent decodes them.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "%":
+            out.append(text[i])
+            i += 1
+            continue
+        start = i
+        lead = _uri_pct_byte(text, i)
+        if lead is None:
+            return None
+        i += 3
+        if lead < 0x80:
+            ch = chr(lead)
+            if not component and ch in _URI_RESERVED:
+                out.append(text[start:i])
+            else:
+                out.append(ch)
+            continue
+        needed = _utf8_lead_length(lead)
+        if needed is None:
+            return None
+        octets = bytearray((lead,))
+        for _ in range(needed - 1):
+            if i >= n or text[i] != "%":
+                return None
+            cont = _uri_pct_byte(text, i)
+            if cont is None or cont & 0xC0 != 0x80:
+                return None
+            octets.append(cont)
+            i += 3
+        try:
+            out.append(octets.decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
+    return "".join(out)
+
+
+def _utf8_lead_length(lead: int) -> int | None:
+    """Byte count encoded by a UTF-8 lead, or None when the lead is illegal."""
+    n = 0
+    while n <= 4 and lead & (0x80 >> n):
+        n += 1
+    if n < 2 or n > 4:
+        return None
+    return n
+
+
+def _uri_pct_byte(text: str, i: int) -> int | None:
+    if i + 2 >= len(text):
+        return None
+    hexpart = text[i + 1 : i + 3]
+    if len(hexpart) != 2 or any(ch not in "0123456789abcdefABCDEF" for ch in hexpart):
+        return None
+    return int(hexpart, 16)
+
+
 def php_urldecode(text: str) -> str:
     return _percent_decode(text.replace("+", " "))
 
