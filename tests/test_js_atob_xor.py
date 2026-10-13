@@ -1,3 +1,5 @@
+import base64
+
 from evilbox.decode import pick_repeating_xor_text, repeating_xor_text
 from evilbox.pipeline import deobfuscate
 from evilbox.unwrap import unwrap_js_atob_xor
@@ -95,6 +97,62 @@ def test_unwrap_js_atob_xor_direct():
     for url in USER_URLS:
         assert url in text
     assert USER_BLOB not in text
+
+
+def _xor_iife(blob: str, key: str) -> str:
+    return (
+        "(function(b,k){var r=\"\",x=atob(b);for(var i=0;i<x.length;i++)"
+        "r+=String.fromCharCode(x.charCodeAt(i)^k.charCodeAt(i%k.length));return r;})"
+        f'("{blob}","{key}")'
+    )
+
+
+def test_repeating_xor_text_uses_utf16_code_units():
+    # atob("QQ==") is "A". U+4E16 is one unit; U+1F44D is the surrogate pair D83D DC4D.
+    assert repeating_xor_text("QQ==", "世", use_atob=True) == "\u4e57"
+    assert repeating_xor_text("QQ==", "👍", use_atob=True) == chr(0x41 ^ 0xD83D)
+    assert repeating_xor_text("A", "世", use_atob=False) == "\u4e57"
+
+
+def test_repeating_xor_text_does_not_utf8_decode():
+    payload = "café".encode()
+    key = "k"
+    xored = bytes(byte ^ ord(key) for byte in payload)
+    blob = base64.b64encode(xored).decode()
+    text = repeating_xor_text(blob, key, use_atob=True)
+    assert text == payload.decode("latin-1")
+    assert text != "café"
+
+
+def test_unicode_xor_key_does_not_abort_decode():
+    src = (
+        _xor_iife("QQ==", "世界")
+        + ";\n"
+        + 'var next = atob("aHR0cHM6Ly9ldmlsLmV4YW1wbGUvZw==");\n'
+        + 'var LIVE = "keep-me";\n'
+    )
+    result = deobfuscate(src, language="js")
+    assert "\u4e57" in result.text
+    assert "https://evil.example/g" in result.text
+    assert "keep-me" in result.text
+
+
+def test_utf8_xor_payload_keeps_live_branch():
+    # A non-latin-1 character puts the file in the UTF-8 offset regime, so a
+    # wrong decoded string is compared and the other branch is deleted.
+    payload = "café".encode()
+    key = "k"
+    xored = bytes(byte ^ ord(key) for byte in payload)
+    blob = base64.b64encode(xored).decode()
+    src = (
+        'var mark = "世";\n'
+        f'if ({_xor_iife(blob, key)} === "caf\\u00c3\\u00a9") '
+        "{ livePath(); } else { decoyPath(); }\n"
+    )
+    result = deobfuscate(src, language="js")
+    assert "caf\u00e9" not in result.text
+    assert "livePath" in result.text
+    assert "decoyPath" not in result.text
 
 
 def test_js_xor_iife_skips_rc4_percent_256():

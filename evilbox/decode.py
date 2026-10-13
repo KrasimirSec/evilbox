@@ -610,23 +610,43 @@ def xor_bytes(data: bytes, key: bytes) -> bytes | None:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 
+def _js_utf16_units(text: str) -> list[int]:
+    """UTF-16 code units, matching JavaScript `charCodeAt` and string length."""
+    units: list[int] = []
+    for ch in text:
+        code = ord(ch)
+        if code <= 0xFFFF:
+            units.append(code)
+            continue
+        code -= 0x10000
+        units.append(0xD800 + (code >> 10))
+        units.append(0xDC00 + (code & 0x3FF))
+    return units
+
+
 def repeating_xor_text(blob: str, key: str, *, use_atob: bool = True) -> str | None:
-    """Decode a repeating-key XOR of latin-1 bytes, optionally after atob/base64."""
+    """XOR the way `fromCharCode(a.charCodeAt(i) ^ b.charCodeAt(i % b.length))` does.
+
+    With `use_atob`, each decoded byte is one code unit. Otherwise both sides are
+    JavaScript strings. The result is those code units, not a UTF-8 decode, and
+    code points above U+00FF must not raise.
+    """
     if not blob or not key:
         return None
     if use_atob:
-        data = b64decode(blob)
-        if data is None:
+        decoded = b64decode(blob)
+        if not decoded:
             return None
+        data_units = list(decoded)
     else:
-        data = blob.encode("latin-1")
-    xored = xor_bytes(data, key.encode("latin-1"))
-    if xored is None:
+        data_units = _js_utf16_units(blob)
+        if not data_units:
+            return None
+    key_units = _js_utf16_units(key)
+    if not key_units:
         return None
-    text = bytes_to_text(xored)
-    if text is not None:
-        return text
-    return xored.decode("latin-1")
+    mixed = [data_units[i] ^ key_units[i % len(key_units)] for i in range(len(data_units))]
+    return "".join(chr(unit) for unit in mixed)
 
 
 def xor_plaintext_score(text: str) -> int:
