@@ -26,6 +26,25 @@ def test_js_eval_atob():
     assert "eval" not in result.text
 
 
+def test_js_atob_keeps_binary_string():
+    # atob("w6k=") is the bytes C3 A9, which JavaScript exposes as two units.
+    folded = deobfuscate('var s = atob("w6k=");', language="js")
+    assert folded.parse_ok
+    assert "\u00c3\u00a9" in folded.text
+    assert "\u00e9" not in folded.text
+
+    # A non-latin-1 character selects the UTF-8 offset regime, where a wrong
+    # string is compared and the other branch is deleted.
+    src = (
+        'var mark = "\u4e16";\n'
+        'if (atob("w6k=") === "\\xc3\\xa9") { livePath(); } else { decoyPath(); }\n'
+    )
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "livePath" in result.text
+    assert "decoyPath" not in result.text
+
+
 def test_js_hex_string_unescape():
     src = r'var a = "\x48\x69";'
     result = deobfuscate(src, language="js")
