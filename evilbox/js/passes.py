@@ -1143,8 +1143,9 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         data = b64decode(s)
         if data is None:
             return None
-        text = bytes_to_text(data)
-        return Value(text) if text is not None else None
+        # One code unit per byte. UTF-8 would turn C3 A9 into U+00E9, the
+        # comparison would fail, and dead-branch removal would keep the decoy.
+        return Value(data.decode("latin-1"))
 
     if obj == "unescape" and prop is None:
         s = values[0].py if values and isinstance(values[0].py, str) else None
