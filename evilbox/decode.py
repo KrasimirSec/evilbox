@@ -664,6 +664,45 @@ def pick_repeating_xor_text(
     return None
 
 
+# Literal `.split("...")` / `.split('...')`. The body is a JS string, so escapes
+# stay escaped until unescape_js_string_body. An empty separator is `split("")`.
+_JS_SPLIT_LITERAL = re.compile(r"""\.split\s*\(\s*(['"])((?:\\.|(?!\1).)*)\1\s*\)""")
+_JS_RETURN_SPLIT = re.compile(r"""return\s+\(?\s*[A-Za-z_$][\w$]*\s*$""")
+
+
+def js_xor_split_separator(body: str) -> str | None:
+    """Separator applied to a repeating-XOR result, or None if it is not split.
+
+    An empty string means ``split("")``. The first ``.split`` in the function is
+    often ``key.split("")`` or a decoy; the result is the split that is returned.
+    When nothing is returned directly, the last non-empty literal split is the
+    ``out = r.split("|"); return out`` form. ``str.split("")`` raises, so callers
+    must use ``split_js_string``.
+    """
+    matches = list(_JS_SPLIT_LITERAL.finditer(body))
+    if not matches:
+        return None
+    returned = [
+        match
+        for match in matches
+        if _JS_RETURN_SPLIT.search(body[: match.start()])
+    ]
+    if returned:
+        return unescape_js_string_body(returned[0].group(2))
+    for match in reversed(matches):
+        separator = unescape_js_string_body(match.group(2))
+        if separator != "":
+            return separator
+    return None
+
+
+def split_js_string(text: str, separator: str) -> list[str]:
+    """``String.prototype.split`` for a string separator, including ``""``."""
+    if separator == "":
+        return list(text)
+    return text.split(separator)
+
+
 def xor_strings(left: str, right: str) -> str:
     a = php_string_bytes(left)
     b = php_string_bytes(right)

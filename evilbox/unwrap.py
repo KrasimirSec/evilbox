@@ -12,10 +12,12 @@ from evilbox.decode import (
     gzip_zlib_or_inflate,
     hex_payload_to_text,
     js_quote,
+    js_xor_split_separator,
     looks_like_php_source,
     parse_js_quoted_string,
     pas_recover_payload,
     pick_repeating_xor_text,
+    split_js_string,
     unescape_js_string_body,
 )
 
@@ -181,9 +183,10 @@ def _js_atob_xor_span(source: str, fn_at: int) -> tuple[int, int, str] | None:
     )
     if not text:
         return None
-    split_m = re.search(r"\.split\s*\(\s*(['\"])(.*?)\1\s*\)", body)
-    if split_m:
-        rendered = "[" + ", ".join(js_quote(part) for part in text.split(split_m.group(2))) + "]"
+    separator = js_xor_split_separator(body)
+    if separator is not None:
+        parts = split_js_string(text, separator)
+        rendered = "[" + ", ".join(js_quote(part) for part in parts) + "]"
     else:
         rendered = js_quote(text)
     return start, end, rendered
