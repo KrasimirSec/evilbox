@@ -97,6 +97,79 @@ def test_unwrap_js_atob_xor_direct():
     assert USER_BLOB not in text
 
 
+def _pipe_xor_iife(body: str, *, arrow: bool = False) -> str:
+    call = f'("{USER_BLOB}","{USER_KEY}")'
+    if arrow:
+        return "((b,k)=>{" + body + "})" + call
+    return "(function(b,k){" + body + "})" + call
+
+
+_XOR_LOOP = (
+    'var r="",x=atob(b);for(var i=0;i<x.length;i++)'
+    "r+=String.fromCharCode(x.charCodeAt(i)^k.charCodeAt(i%k.length));"
+)
+
+
+def test_xor_iife_returned_split_ignores_earlier_splits():
+    """A key or decoy split must not crash the decode or choose the separator."""
+    body = 'var decoy="a,b".split(",");var chars=k.split("");' + _XOR_LOOP + 'return r.split("|");'
+    src = (
+        "var O="
+        + _pipe_xor_iife(body)
+        + ";"
+        + f'if (O[0] === "{USER_URLS[0]}") {{ liveCall(); }} else {{ decoyCall(); }}'
+    )
+    result = deobfuscate(src, language="js")
+    assert "liveCall" in result.text
+    assert "decoyCall" not in result.text
+    for url in USER_URLS:
+        assert f'"{url}"' in result.text
+    assert "|https://" not in result.text
+
+
+def test_arrow_xor_iife_returned_split_ignores_key_split():
+    body = 'var chars=k.split("");' + _XOR_LOOP + 'return r.split("|");'
+    src = (
+        "var O="
+        + _pipe_xor_iife(body, arrow=True)
+        + ";"
+        + f'if (O[0] === "{USER_URLS[0]}") {{ liveCall(); }} else {{ decoyCall(); }}'
+    )
+    result = deobfuscate(src, language="js")
+    assert "liveCall" in result.text
+    assert "decoyCall" not in result.text
+    for url in USER_URLS:
+        assert f'"{url}"' in result.text
+
+
+def test_xor_iife_unescapes_hex_split_separator():
+    src = _pipe_xor_iife(_XOR_LOOP + 'return r.split("\\x7c");')
+    result = deobfuscate(src, language="js")
+    for url in USER_URLS:
+        assert f'"{url}"' in result.text
+    assert "|https://" not in result.text
+
+
+def test_xor_iife_empty_result_split_does_not_crash():
+    src = _pipe_xor_iife(_XOR_LOOP + 'return r.split("");')
+    result = deobfuscate(src, language="js")
+    assert '"h"' in result.text
+    assert '"|"' in result.text
+    assert '"https://trackerredirect.online"' not in result.text
+
+
+def test_xor_iife_key_split_does_not_split_payload():
+    body = (
+        'var chars=k.split("");var r="",x=atob(b);for(var i=0;i<x.length;i++)'
+        "r+=String.fromCharCode(x.charCodeAt(i)^chars[i%chars.length].charCodeAt(0));"
+        "return r;"
+    )
+    result = deobfuscate(_pipe_xor_iife(body), language="js")
+    joined = "|".join(USER_URLS)
+    assert joined in result.text
+    assert '"h"' not in result.text
+
+
 def test_js_xor_iife_skips_rc4_percent_256():
     src = (
         "(function(b,k){var r=\"\",n=k.charCodeAt(0)%256;"

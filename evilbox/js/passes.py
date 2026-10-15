@@ -12,10 +12,12 @@ from evilbox.decode import (
     hex_payload_to_text,
     js_quote,
     js_unescape,
+    js_xor_split_separator,
     parse_js_quoted_string,
     percent_decode,
     pick_repeating_xor_text,
     rc4_crypt,
+    split_js_string,
     unescape_html_entities,
     unescape_js_string_body,
 )
@@ -1075,9 +1077,9 @@ def _eval_xor_iife(node, source: str, values: list[Value], env: FoldEnv | None) 
     text = pick_repeating_xor_text(blob, key, use_atob=use_atob, swapped_ok=not mapped)
     if not text:
         return None
-    split_m = re.search(r"\.split\s*\(\s*(['\"])(.*?)\1\s*\)", body)
-    if split_m:
-        parts = text.split(split_m.group(2))
+    separator = js_xor_split_separator(body)
+    if separator is not None:
+        parts = split_js_string(text, separator)
         result = Value([Value(part) for part in parts])
     else:
         result = Value(text)
