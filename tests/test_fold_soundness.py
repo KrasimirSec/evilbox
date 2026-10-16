@@ -36,6 +36,26 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_buffer_from_base64_decodes_before_compare():
+    src = """
+if (Buffer.from("Y29uc29sZS5sb2coMSk=", "base64").toString() === "console.log(1)") { real(); } else { decoy(); }
+eval(Buffer.from("Y29u\\nc29sZS5sb2coMSk=", "base64").toString());
+if (Buffer.from("aGVsbG8_", "base64url").toString() === "hello?") { keepUrl(); } else { dropUrl(); }
+if (Buffer.from("//4=", "base64").toString() === "\\u00ff\\u00fe") { keepBin(); } else { dropBin(); }
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "real();" in result.text
+    assert "decoy" not in result.text
+    assert "console.log(1)" in result.text
+    assert "Y29uc29sZS5sb2coMSk=" not in result.text
+    assert "keepUrl();" in result.text
+    assert "dropUrl" not in result.text
+    assert "keepBin();" in result.text
+    assert "dropBin();" in result.text
+    assert "Buffer.from" in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")

@@ -7,6 +7,7 @@ from typing import Any
 
 from evilbox.decode import (
     b64decode,
+    buffer_base64_text,
     bytes_to_text,
     format_js_number,
     hex_payload_to_text,
@@ -1163,6 +1164,11 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         enc = values[1].py.lower() if len(values) > 1 and isinstance(values[1].py, str) else "utf8"
         if enc == "hex" and isinstance(raw, str):
             decoded = hex_payload_to_text(raw, min_bytes=1)
+            return Value(decoded) if decoded is not None else None
+        if enc in {"base64", "base64url"} and isinstance(raw, str):
+            # Default Buffer#toString is UTF-8. Returning the ciphertext here
+            # makes a later comparison keep the decoy branch.
+            decoded = buffer_base64_text(raw, urlsafe=enc == "base64url")
             return Value(decoded) if decoded is not None else None
         if isinstance(raw, str):
             return Value(raw)

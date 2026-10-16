@@ -33,6 +33,29 @@ def b64decode(text: str) -> bytes | None:
     return None
 
 
+def buffer_base64_text(text: str, *, urlsafe: bool = False) -> str | None:
+    """Node `Buffer.from(text, "base64").toString()`.
+
+    The default encoding is UTF-8, so the fold is the decoded source, not the
+    ciphertext. Bytes that are not UTF-8 stay unfolded: Node would insert
+    U+FFFD, and a latin-1 stand-in would win the wrong branch.
+    """
+    cleaned = re.sub(r"\s+", "", text)
+    if not cleaned:
+        return ""
+    pad = (-len(cleaned)) % 4
+    cleaned += "=" * pad
+    decoder = base64.urlsafe_b64decode if urlsafe else base64.b64decode
+    try:
+        data = decoder(cleaned)
+    except Exception:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def hex_decode(text: str) -> bytes | None:
     cleaned = text.strip()
     if re.search(r"\\x[0-9a-fA-F]{2}", cleaned, re.I):
