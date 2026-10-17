@@ -43,6 +43,37 @@ def test_js_loop_concat_is_not_collapsed():
     assert "console.log(\"ab\")" not in result.text
 
 
+def test_js_split_limit_discards_the_tail():
+    src = """
+if ("aa|bb|cc".split("|", 2).join(",") === "aa,bb") { live(); } else { decoy(); }
+if ("aa|bb|cc".split("|", 2.9).join(",") === "aa,bb") { keepFrac(); } else { dropFrac(); }
+if ("LIVE|DECOY".split("|", 0).join("|") === "") { keepEmpty(); } else { dropEmpty(); }
+if ("aa|bb".split("|", -1).join("|") === "aa|bb") { keepNeg(); } else { dropNeg(); }
+if ("aa|bb".split("|", 1e309).join("|") === "") { keepInf(); } else { dropInf(); }
+if ("ab".split("", 1).join("") === "a") { keepChars(); } else { dropChars(); }
+var parts = "https://a.test|https://b.test|https://c.test".split("|", 2);
+var whole = "2|0|1".split("|");
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "live();" in result.text
+    assert "decoy" not in result.text
+    assert "keepFrac();" in result.text
+    assert "dropFrac" not in result.text
+    assert "keepEmpty();" in result.text
+    assert "dropEmpty" not in result.text
+    assert "keepNeg();" in result.text
+    assert "dropNeg" not in result.text
+    assert "keepInf();" in result.text
+    assert "dropInf" not in result.text
+    assert "keepChars();" in result.text
+    assert "dropChars" not in result.text
+    assert '"https://a.test"' in result.text
+    assert '"https://b.test"' in result.text
+    assert "https://c.test" not in result.text
+    assert '"2"' in result.text and '"0"' in result.text and '"1"' in result.text
+
+
 def test_unterminated_quote_does_not_hang():
     blob = "'" + ("\\" * 60)
     started = time.perf_counter()

@@ -891,6 +891,17 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not (isinstance(value, float) and math.isnan(value))
 
 
+def _js_uint32(value: Any) -> int | None:
+    """JavaScript ToUint32. Non-numbers are left unfolded."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return 0
+        value = math.trunc(value)
+    return int(value) % 4294967296
+
+
 def _js_truthy(value: Any) -> bool:
     """JavaScript ToBoolean, including empty arrays (objects are truthy)."""
     if value is None or value is False:
@@ -1263,7 +1274,15 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
                 return None
             if len(py) > 500_000:
                 return None
+            limit = None
+            if len(values) > 1:
+                limit = _js_uint32(values[1].py)
+                if limit is None:
+                    return None
             parts = list(py) if sep == "" else py.split(sep)
+            # `limit` is a cap: the tail is discarded. Python maxsplit would keep it.
+            if limit is not None:
+                parts = parts[:limit]
             return Value([Value(p) for p in parts])
         if name == "replace" and len(values) >= 2 and isinstance(values[0].py, str) and isinstance(values[1].py, str):
             return Value(py.replace(values[0].py, values[1].py, 1))
