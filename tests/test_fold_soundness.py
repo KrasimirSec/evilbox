@@ -36,6 +36,56 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_number_tostring_keeps_fraction_and_infinity():
+    """Number toString used Python int(), so fractions became 0 and Infinity crashed."""
+    src = """
+if ((1/2).toString() === "0.5") { live(); } else { decoy(); }
+if ((10.5).toString() === "10.5") { keepFrac(); } else { dropFrac(); }
+if ((-10.5).toString() === "-10.5") { keepNeg(); } else { dropNeg(); }
+if ((1e-7).toString() === "1e-7") { keepTiny(); } else { dropTiny(); }
+if ((1e-6).toString() === "0.000001") { keepMilli(); } else { dropMilli(); }
+if ((1e21).toString() === "1e+21") { keepSci(); } else { dropSci(); }
+if ((1e309).toString() === "Infinity") { keepInf(); } else { dropInf(); }
+if ((-1e309).toString() === "-Infinity") { keepNegInf(); } else { dropNegInf(); }
+if (String(1.0) === "1") { keepOne(); } else { dropOne(); }
+if (String(1e-7) === "1e-7") { keepStrExp(); } else { dropStrExp(); }
+if ((255).toString(16) === "ff") { keepHex(); } else { dropHex(); }
+if ((-1.25).toString(16) === "-1.4") { keepRadix(); } else { dropRadix(); }
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    for kept in (
+        "live();",
+        "keepFrac();",
+        "keepNeg();",
+        "keepTiny();",
+        "keepMilli();",
+        "keepSci();",
+        "keepInf();",
+        "keepNegInf();",
+        "keepOne();",
+        "keepStrExp();",
+        "keepHex();",
+        "keepRadix();",
+    ):
+        assert kept in result.text
+    for dropped in (
+        "decoy",
+        "dropFrac",
+        "dropNeg",
+        "dropTiny",
+        "dropMilli",
+        "dropSci",
+        "dropInf",
+        "dropNegInf",
+        "dropOne",
+        "dropStrExp",
+        "dropHex",
+    ):
+        assert dropped not in result.text
+    assert "toString(16)" in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")

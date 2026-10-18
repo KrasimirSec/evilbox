@@ -1194,6 +1194,9 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return Value("true" if py else "false")
         if py is None:
             return Value("null")
+        if isinstance(py, (int, float)):
+            rendered = _js_number_to_string(py)
+            return Value(rendered) if rendered is not None else None
         return Value(str(py))
 
     from_cc = (
@@ -1301,24 +1304,104 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
             start = int(values[0].py)
             end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
             return Value(py[start:end])
-    if _is_num(py) and name == "toString":
-        radix = int(values[0].py) if values and _is_num(values[0].py) else 10
-        if radix < 2 or radix > 36:
-            return None
-        n = int(py)
-        if radix == 10:
-            return Value(str(n))
-        chars = "0123456789abcdefghijklmnopqrstuvwxyz"
-        if n == 0:
-            return Value("0")
-        sign = "-" if n < 0 else ""
-        n = abs(n)
-        out = []
-        while n:
-            n, rem = divmod(n, radix)
-            out.append(chars[rem])
-        return Value(sign + "".join(reversed(out)))
+    if name == "toString" and isinstance(py, (int, float)) and not isinstance(py, bool):
+        radix = 10
+        if values:
+            raw = values[0].py
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                return None
+            if isinstance(raw, float) and not math.isfinite(raw):
+                return None
+            radix = int(raw)
+        rendered = _js_number_to_string(py, radix)
+        return Value(rendered) if rendered is not None else None
     return None
+
+
+_JS_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+# Integers above this are not all exactly representable, so a non-decimal
+# toString would invent digits. Leave those calls in place.
+_JS_SAFE_INTEGER = 1 << 53
+
+
+def _js_decimal_string(number: float) -> str:
+    """ECMAScript Number::toString for a finite number (radix 10)."""
+    if number == 0:
+        return "0"
+    sign = "-" if number < 0 else ""
+    text = str(abs(number))
+    if "e" in text:
+        mantissa, exp_text = text.split("e")
+        exponent: int | None = int(exp_text)
+    else:
+        mantissa = text
+        exponent = None
+    if "." in mantissa:
+        whole, frac = mantissa.split(".")
+    else:
+        whole, frac = mantissa, ""
+    if exponent is None:
+        if whole != "0":
+            exponent = len(whole) - 1
+            digits = (whole + frac).lstrip("0")
+        else:
+            stripped = frac.lstrip("0")
+            zeros = len(frac) - len(stripped)
+            exponent = -(zeros + 1) if stripped else 0
+            digits = stripped or "0"
+    else:
+        digits = (whole + frac).lstrip("0") or "0"
+    digits = digits.rstrip("0") or "0"
+    k = len(digits)
+    n = exponent + 1
+    if k <= n <= 21:
+        body = digits + ("0" * (n - k))
+    elif 0 < n <= 21:
+        body = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        body = "0." + ("0" * (-n)) + digits
+    elif k == 1:
+        body = digits + "e" + ("+" if n - 1 > 0 else "-") + str(abs(n - 1))
+    else:
+        body = digits[0] + "." + digits[1:] + "e" + ("+" if n - 1 > 0 else "-") + str(abs(n - 1))
+    return sign + body
+
+
+def _js_integer_radix(value: int, radix: int) -> str:
+    sign = "-" if value < 0 else ""
+    n = abs(value)
+    if n == 0:
+        return "0"
+    out: list[str] = []
+    while n:
+        n, rem = divmod(n, radix)
+        out.append(_JS_DIGITS[rem])
+    return sign + "".join(reversed(out))
+
+
+def _js_number_to_string(value: int | float, radix: int = 10) -> str | None:
+    """JavaScript number toString. Does not truncate a fraction to an int."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if radix < 2 or radix > 36:
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if math.isnan(number):
+        return "NaN"
+    if math.isinf(number):
+        return "Infinity" if number > 0 else "-Infinity"
+    if radix == 10:
+        return _js_decimal_string(number)
+    if number == 0:
+        return "0"
+    # A fractional or unsafe integer in another radix has an engine-defined
+    # digit string. Folding it with Python's int() keeps the decoy branch.
+    if abs(number) > _JS_SAFE_INTEGER or number != math.trunc(number):
+        return None
+    return _js_integer_radix(int(number), radix)
 
 
 def _rename_junk(source: str) -> str:
