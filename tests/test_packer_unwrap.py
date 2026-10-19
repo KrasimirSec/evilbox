@@ -369,3 +369,77 @@ def test_request_driven_and_remote_hints():
     assert "remote-payload" in hints
     assert "variable-function" in hints
 
+
+_AA_GLYPHS = (
+    "(c^_^o)",
+    "(ﾟΘﾟ)",
+    "((o^_^o) -(ﾟΘﾟ))",
+    "(o^_^o)",
+    "(ﾟｰﾟ)",
+    "((ﾟｰﾟ) +(ﾟΘﾟ))",
+    "((o^_^o) +(o^_^o))",
+    "((ﾟｰﾟ) +(o^_^o))",
+    "((ﾟｰﾟ) +(ﾟｰﾟ))",
+    "((ﾟｰﾟ) +(ﾟｰﾟ) +(ﾟΘﾟ))",
+)
+_AA_HEAD = (
+    "ﾟωﾟﾉ= /｀ｍ´）ﾉ ~┻━┻   //*´∇｀*/ ['_']; o=(ﾟｰﾟ) =_=3; c=(ﾟΘﾟ) =(ﾟｰﾟ)-(ﾟΘﾟ); "
+    "(ﾟДﾟ) =(ﾟΘﾟ)= (o^_^o)/ (o^_^o);"
+    "(ﾟДﾟ)={ﾟΘﾟ: '_' ,ﾟωﾟﾉ: ((ﾟωﾟﾉ==3) +'_') [ﾟΘﾟ] ,ﾟｰﾟﾉ :(ﾟωﾟﾉ+ '_')[o^_^o -(ﾟΘﾟ)] "
+    ",ﾟДﾟﾉ:((ﾟｰﾟ==3) +'_')[ﾟｰﾟ] }; (ﾟДﾟ) [ﾟΘﾟ] =((ﾟωﾟﾉ==3) +'_') [c^_^o];"
+    "(ﾟДﾟ) ['c'] = ((ﾟДﾟ)+'_') [ (ﾟｰﾟ)+(ﾟｰﾟ)-(ﾟΘﾟ) ];(ﾟДﾟ) ['o'] = ((ﾟДﾟ)+'_') [ﾟΘﾟ];"
+    "(ﾟoﾟ)=(ﾟДﾟ) ['c']+(ﾟДﾟ) ['o']+(ﾟωﾟﾉ +'_')[ﾟΘﾟ]+ ((ﾟωﾟﾉ==3) +'_') [ﾟｰﾟ] + "
+    "((ﾟДﾟ) +'_') [(ﾟｰﾟ)+(ﾟｰﾟ)]+ ((ﾟｰﾟ==3) +'_') [ﾟΘﾟ]+((ﾟｰﾟ==3) +'_') [(ﾟｰﾟ) - (ﾟΘﾟ)]+"
+    "(ﾟДﾟ) ['c']+((ﾟДﾟ)+'_') [(ﾟｰﾟ)+(ﾟｰﾟ)]+ (ﾟДﾟ) ['o']+((ﾟｰﾟ==3) +'_') [ﾟΘﾟ];"
+    "(ﾟДﾟ) ['_'] =(o^_^o) [ﾟoﾟ] [ﾟoﾟ];"
+    "(ﾟεﾟ)=((ﾟｰﾟ==3) +'_') [ﾟΘﾟ]+ (ﾟДﾟ) .ﾟДﾟﾉ+((ﾟДﾟ)+'_') [(ﾟｰﾟ) + (ﾟｰﾟ)]+"
+    "((ﾟｰﾟ==3) +'_') [o^_^o -ﾟΘﾟ]+((ﾟｰﾟ==3) +'_') [ﾟΘﾟ]+ (ﾟωﾟﾉ +'_') [ﾟΘﾟ]; "
+    "(ﾟｰﾟ)+=(ﾟΘﾟ); (ﾟДﾟ)[ﾟεﾟ]='\\\\'; "
+    "(ﾟДﾟ).ﾟΘﾟﾉ=(ﾟДﾟ+ ﾟｰﾟ)[o^_^o -(ﾟΘﾟ)];(oﾟｰﾟo)=(ﾟωﾟﾉ +'_')[c^_^o];"
+    "(ﾟДﾟ) [ﾟoﾟ]='\\\"';(ﾟДﾟ) ['_'] ( (ﾟДﾟ) ['_'] (ﾟεﾟ+(ﾟДﾟ)[ﾟoﾟ]+ "
+)
+_AA_TAIL = "(ﾟДﾟ)[ﾟoﾟ]) (ﾟΘﾟ)) ('_');"
+
+
+def _aaencode(text: str, *, spaced: bool = True) -> str:
+    table = _AA_GLYPHS if spaced else tuple(glyph.replace(" ", "") for glyph in _AA_GLYPHS)
+    parts = []
+    for ch in text:
+        octal = format(ord(ch), "o")
+        parts.append("(ﾟДﾟ)[ﾟεﾟ]+" + "+".join(table[int(digit)] for digit in octal) + "+")
+    return _AA_HEAD + "".join(parts) + _AA_TAIL
+
+
+def test_aaencode_recovers_spaced_and_compact_payloads():
+    for spaced in (True, False):
+        src = _aaencode("alert(1)", spaced=spaced)
+        result = deobfuscate(src, language="js")
+        assert result.text.strip() == "alert(1)"
+        assert "ﾟΘﾟ" not in result.text
+        assert "aaencode" in result.packer
+        assert any("AAEncode" in note for note in result.warnings)
+
+
+def test_aaencode_does_not_replace_a_sample_with_leftover_digits():
+    """Compound glyphs used to be split into their pieces and accepted as text."""
+    glyphs = {
+        "0": "(c^_^o)",
+        "1": "(ﾟΘﾟ)",
+        "2": "((o^_^o)-(ﾟΘﾟ))",
+        "3": "(o^_^o)",
+        "4": "(ﾟｰﾟ)",
+        "5": "((ﾟｰﾟ)+(ﾟΘﾟ))",
+        "6": "((o^_^o)+(o^_^o))",
+        "7": "((ﾟｰﾟ)+(o^_^o))",
+    }
+    body = "+".join(
+        "+".join(glyphs[digit] for digit in format(ord(ch), "o")) for ch in "hello world!!"
+    )
+    src = "ﾟωﾟ" + body
+    result = deobfuscate(src, language="js")
+    assert "hello world!!" not in result.text
+    assert "!\x0c" not in result.text
+    assert "c^_^o" in result.text.replace(" ", "")
+    assert any("could not be fully recovered" in note for note in result.warnings)
+    assert "Unpacked AAEncode" not in " ".join(result.warnings)
+

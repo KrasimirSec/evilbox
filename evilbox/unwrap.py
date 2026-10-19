@@ -1076,36 +1076,48 @@ def unwrap_aaencode(source: str) -> tuple[str, list[str]]:
     return decoded, ["Unpacked AAEncode emoticon encoding."]
 
 
+# Longer glyphs contain the one-character tokens, so they have to be replaced first.
+# The published encoder also writes a space around + and -.
+_AA_DIGITS = (
+    (r"\(\(ﾟｰﾟ\)\s*\+\s*\(ﾟｰﾟ\)\s*\+\s*\(ﾟΘﾟ\)\)", "9"),
+    (r"\(\(ﾟｰﾟ\)\s*\+\s*\(ﾟｰﾟ\)\)", "8"),
+    (r"\(\(ﾟｰﾟ\)\s*\+\s*\(o\^_\^o\)\)", "7"),
+    (r"\(\(o\^_\^o\)\s*\+\s*\(o\^_\^o\)\)", "6"),
+    (r"\(\(ﾟｰﾟ\)\s*\+\s*\(ﾟΘﾟ\)\)", "5"),
+    (r"\(\(o\^_\^o\)\s*-\s*\(ﾟΘﾟ\)\)", "2"),
+    (r"\(c\^_\^o\)", "0"),
+    (r"\(ﾟΘﾟ\)", "1"),
+    (r"\(o\^_\^o\)", "3"),
+    (r"\(ﾟｰﾟ\)", "4"),
+)
+_AA_OCTAL_RUN = re.compile(r"\(ﾟДﾟ\)\s*\[\s*ﾟεﾟ\s*\]\s*([0-7]+)")
+
+
 def _aadecode(source: str) -> str | None:
-    """Map AAEncode's 3-bit glyphs to octal character codes without a JS engine."""
+    """Read AAEncode's `(ﾟДﾟ)[ﾟεﾟ] + octal digits` payload without executing it.
+
+    The bootstrap uses the same glyphs as the payload. Scanning every digit
+    run in the file turns that bootstrap into extra characters, and replacing
+    a short glyph before the compound glyph that contains it changes the
+    octal codes. Only the backslash runs are character data.
+    """
     text = re.sub(r"/\*.*?\*/", "", source)
-    digits = (
-        (r"\(c\^_\^o\)", "0"),
-        (r"\(ﾟΘﾟ\)", "1"),
-        (r"\(\(o\^_\^o\)-\(ﾟΘﾟ\)\)", "2"),
-        (r"\(o\^_\^o\)", "3"),
-        (r"\(ﾟｰﾟ\)", "4"),
-        (r"\(\(ﾟｰﾟ\)\+\(ﾟΘﾟ\)\)", "5"),
-        (r"\(\(o\^_\^o\)\+\(o\^_\^o\)\)", "6"),
-        (r"\(\(ﾟｰﾟ\)\+\(o\^_\^o\)\)", "7"),
-    )
-    for pat, digit in digits:
+    for pat, digit in _AA_DIGITS:
         text = re.sub(pat, digit, text)
     text = text.replace("+", "")
-    chunks = re.findall(r"(\d{2,3})", text)
-    if len(chunks) < 8:
+    chunks = _AA_OCTAL_RUN.findall(text)
+    if len(chunks) < 4:
         return None
     out: list[str] = []
     for chunk in chunks:
         try:
             code = int(chunk, 8)
         except ValueError:
-            continue
-        if 9 <= code <= 0x10FFFF:
-            out.append(chr(code))
+            return None
+        if code > 0x10FFFF:
+            return None
+        out.append(chr(code))
     payload = "".join(out)
-    if len(payload) < 6:
-        return None
     printable = sum(1 for ch in payload if ch.isprintable() or ch in "\n\r\t")
     if printable / len(payload) < 0.8:
         return None
