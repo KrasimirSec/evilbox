@@ -732,6 +732,70 @@ def php_str_pad(text: str, width: int, pad: str = " ", style: int = 1) -> str | 
     return text + fill
 
 
+# PHP_INT_MIN / PHP_INT_MAX on 64-bit builds, which is what these samples run on.
+_PHP_INT_MIN = -2**63
+_PHP_INT_MAX = 2**63 - 1
+
+
+def php_intval(text: str, base: int = 10) -> int | None:
+    """PHP intval() for a string.
+
+    The base is used only for strings. Parsing stops at the first digit that
+    is invalid for that base, and the result is clamped to a 64-bit PHP int.
+    Base 0 (prefix detection) is left unfolded; bases outside 2..36 are invalid.
+    """
+    if base != 0 and not 2 <= base <= 36:
+        return None
+    if base == 0:
+        return None
+    s = text.lstrip(" \t\n\r\v\f")
+    if not s:
+        return 0
+    sign = 1
+    if s[0] in "+-":
+        sign = -1 if s[0] == "-" else 1
+        s = s[1:]
+    if base == 16 and len(s) >= 2 and s[0] == "0" and s[1] in "xX":
+        rest = s[2:]
+        if rest and _php_int_digit(rest[0], 16) is not None:
+            s = rest
+    limit = _PHP_INT_MAX + 1
+    overflow = False
+    number = 0
+    for ch in s:
+        digit = _php_int_digit(ch, base)
+        if digit is None:
+            break
+        if overflow:
+            continue
+        number = number * base + digit
+        if number > limit:
+            overflow = True
+    if overflow:
+        return _PHP_INT_MIN if sign < 0 else _PHP_INT_MAX
+    result = sign * number
+    if result > _PHP_INT_MAX:
+        return _PHP_INT_MAX
+    if result < _PHP_INT_MIN:
+        return _PHP_INT_MIN
+    return result
+
+
+def _php_int_digit(ch: str, base: int) -> int | None:
+    code = ord(ch)
+    if 48 <= code <= 57:
+        value = code - 48
+    elif 65 <= code <= 90:
+        value = code - 55
+    elif 97 <= code <= 122:
+        value = code - 87
+    else:
+        return None
+    if value >= base:
+        return None
+    return value
+
+
 def format_php_number(value: float | int) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"

@@ -17,6 +17,7 @@ from evilbox.decode import (
     looks_like_php_source,
     parse_quoted_string,
     php_bitwise_not,
+    php_intval,
     php_quote,
     php_string_bytes,
     php_str_pad,
@@ -1703,15 +1704,22 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(ord(s[0]))
 
     if name in {"intval", "int"} and values:
-        s = as_str(values[0]) if not _is_num(values[0].py) else None
+        base = 10
+        if len(values) > 1:
+            if not _is_num(values[1].py):
+                return None
+            base = int(values[1].py)
+        # PHP rejects bases other than 0 and 2..36 before converting.
+        if base != 0 and not 2 <= base <= 36:
+            return None
         if _is_num(values[0].py):
+            # The base is ignored when the value is already a number.
             return Value(int(values[0].py))
+        s = as_str(values[0])
         if s is None:
             return None
-        try:
-            return Value(int(s, 10))
-        except ValueError:
-            return None
+        parsed = php_intval(s, base)
+        return Value(parsed) if parsed is not None else None
 
     if name in {"trim", "ltrim", "rtrim"} and values:
         s = as_str(values[0])

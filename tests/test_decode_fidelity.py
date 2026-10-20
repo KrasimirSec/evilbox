@@ -10,6 +10,7 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_intval,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -41,6 +42,28 @@ def test_php_bitwise_not_rejects_non_bytes():
         php_string_bytes("日本語")
     with pytest.raises(ValueError):
         xor_strings("A", "Ω")
+
+
+def test_php_intval_honors_base_and_stops_at_junk():
+    assert php_intval("41", 16) == 0x41
+    assert php_intval("10", 16) == 16
+    assert php_intval("ff", 16) == 255
+    assert php_intval("0x41", 16) == 0x41
+    assert php_intval("41zz", 16) == 0x41
+    assert php_intval("  -2a", 16) == -42
+    assert php_intval("10", 10) == 10
+    assert php_intval("12px") == 12
+    assert php_intval("1e2") == 1
+    assert php_intval("1e2", 16) == 0x1E2
+    assert php_intval("0x10") == 0
+    assert php_intval("08", 8) == 0
+    assert php_intval("010", 8) == 8
+    assert php_intval("") == 0
+    assert php_intval("9223372036854775808") == 2**63 - 1
+    assert php_intval("-9223372036854775809") == -2**63
+    assert php_intval("10", 0) is None
+    assert php_intval("10", 1) is None
+    assert php_intval("10", 37) is None
 
 
 def test_php_substr_version_oob():
