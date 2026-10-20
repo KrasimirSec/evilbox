@@ -10,6 +10,7 @@ from evilbox.decode import (
     bytes_to_text,
     format_js_number,
     hex_payload_to_text,
+    js_decode_uri,
     js_quote,
     js_unescape,
     parse_js_quoted_string,
@@ -1155,8 +1156,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = values[0].py if values and isinstance(values[0].py, str) else None
         if s is None:
             return None
-        decoded = percent_decode(s)
-        return Value(decoded if decoded is not None else s)
+        decoded = js_decode_uri(s, component=(obj == "decodeURIComponent"))
+        if decoded is None:
+            return None
+        return Value(decoded)
 
     if obj == "Buffer" and prop == "from" and values:
         raw = values[0].py
