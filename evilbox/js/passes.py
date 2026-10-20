@@ -29,7 +29,7 @@ from evilbox.rewrite import (
     node_text,
     reset_source_encoding,
     stmt_span,
-    use_source_encoding,
+    use_utf8_encoding,
     walk,
 )
 
@@ -174,7 +174,7 @@ KNOWN_GLOBALS = {
 
 def transform_js(source: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
-    token = use_source_encoding(source)
+    token = use_utf8_encoding()
     try:
         for _ in range(6):
             folded, fold_warnings = _fold_js(source)
