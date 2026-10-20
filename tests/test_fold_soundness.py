@@ -29,6 +29,24 @@ function g() { $a = 'strrev'; echo $a('olleh'); }
     assert "strrev('olleh')" not in result.text.replace(" ", "")
 
 
+def test_php_strtr_array_does_not_rescan_replacements():
+    src = """<?php
+echo strtr("hi all, I said hello", array("h" => "-", "hello" => "hi", "hi" => "hello"));
+echo strtr("abc", array("a" => "b", "b" => "c", "c" => "d"));
+echo strtr("a", array("a" => "ab", "b" => "Q"));
+echo strtr("abc", array("" => "X", "a" => "Z"));
+"""
+    result = deobfuscate(src, language="php")
+    assert "hello all, I said hi" in result.text
+    assert "-ello" not in result.text
+    assert "bcd" in result.text
+    assert "ddd" not in result.text
+    assert "'ab'" in result.text
+    assert "aQ" not in result.text
+    assert "Zbc" in result.text
+    assert "ZXbc" not in result.text and "XZbc" not in result.text
+
+
 def test_php_loop_concat_is_not_collapsed():
     src = "<?php $s = ''; for ($i = 0; $i < 0; $i++) { $s .= 'ab'; } echo $s;"
     result = deobfuscate(src, language="php")
