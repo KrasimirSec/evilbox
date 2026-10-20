@@ -195,6 +195,41 @@ echo "$arg[class]";
     assert "{$arg['class']}" in result.text
 
 
+def test_php_self_type_and_commented_new_survive_parser_gap():
+    """Type positions and comments must not turn the class keyword into constant().
+
+    Several `"$var[class]"` gaps make the repair stick even if a type rewrite
+    adds an error back. `function f(): self` then becomes `constant('self')`,
+    and `new /* c */ self` instantiates the wrong class.
+    """
+    src = """<?php
+class Box {
+    public self $item;
+    function make(): self { return new /* enclosing */ self; }
+    function child(parent $other): self { return $other instanceof
+        /* base */ parent; }
+}
+define('SELF', 'script.php');
+echo SELF;
+echo "$a[class]";
+echo "$b[class]";
+echo "$c[class]";
+"""
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "public self $item" in result.text
+    assert "function make(): self" in result.text
+    assert "new /* enclosing */ self" in result.text
+    assert "function child(parent $other): self" in result.text
+    assert "instanceof" in result.text and "parent" in result.text
+    assert "constant('self')" not in result.text
+    assert "constant('parent')" not in result.text
+    assert "constant('SELF')" in result.text
+    assert "{$a['class']}" in result.text
+    assert "{$b['class']}" in result.text
+    assert "{$c['class']}" in result.text
+
+
 def test_php_keyword_index_in_valid_file_is_left_alone():
     src = '<?php echo "$arg[title]";'
     result = deobfuscate(src, language="php")
@@ -277,6 +312,47 @@ def test_php_dead_payload_assignment_is_dropped():
     assert "$blackhat" not in result.text
     assert "gzinflate" not in result.text
     assert "Dropped unused payload assignment" in " ".join(result.warnings)
+
+
+def test_php_chained_payload_assignment_is_not_split():
+    """`$keep = $blob = ...` is one statement. Deleting only `$blob` leaves `$keep =`."""
+    marker = "chain-marker"
+    pad = "".join("abcdefghijklmnopqrstuvwxyz012345"[(i * 5 + 1) % 32] for i in range(180))
+    payload = f"echo '{marker}'; /* {pad} */"
+    blob = _rot13_gzinflate_blob(payload)
+    assert len(blob) >= 80
+    src = (
+        "<?php $keep = $blackhat = '"
+        + blob
+        + "'; eval(str_rot13(gzinflate(str_rot13(base64_decode($blackhat))))); echo $keep;"
+    )
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert marker in result.text
+    assert "$keep = $blackhat =" in result.text.replace("\n", " ")
+    assert blob in result.text
+    assert "Dropped unused payload assignment" not in " ".join(result.warnings)
+
+
+def test_php_globals_read_keeps_payload_assignment():
+    """`$GLOBALS['blob']` is still a read of the global, after the `$blob` splice."""
+    marker = "globals-marker"
+    pad = "".join("abcdefghijklmnopqrstuvwxyz012345"[(i * 5 + 1) % 32] for i in range(180))
+    payload = f"echo '{marker}'; /* {pad} */"
+    blob = _rot13_gzinflate_blob(payload)
+    assert len(blob) >= 80
+    src = (
+        "<?php $blackhat = '"
+        + blob
+        + "'; eval(str_rot13(gzinflate(str_rot13(base64_decode($blackhat)))));"
+        + " echo $GLOBALS['blackhat'];"
+    )
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert marker in result.text
+    assert blob in result.text
+    assert "$GLOBALS['blackhat']" in result.text
+    assert "Dropped unused payload assignment" not in " ".join(result.warnings)
 
 
 def test_php_payload_assignment_kept_when_still_read():
