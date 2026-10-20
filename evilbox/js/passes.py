@@ -1224,15 +1224,108 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     return None
 
 
+def _js_int_or_none(value: Any) -> int | None:
+    """Truncate a finite number toward zero. Non-finite values are not folded."""
+    if not _is_num(value):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _js_get_substitution(replacement: str, matched: str, source: str, position: int) -> str:
+    """JavaScript GetSubstitution for a string pattern (no capture groups)."""
+    out: list[str] = []
+    i = 0
+    n = len(replacement)
+    while i < n:
+        if replacement[i] != "$" or i + 1 >= n:
+            out.append(replacement[i])
+            i += 1
+            continue
+        nxt = replacement[i + 1]
+        if nxt == "$":
+            out.append("$")
+            i += 2
+        elif nxt == "&":
+            out.append(matched)
+            i += 2
+        elif nxt == "`":
+            out.append(source[:position])
+            i += 2
+        elif nxt == "'":
+            out.append(source[position + len(matched) :])
+            i += 2
+        else:
+            out.append("$")
+            i += 1
+    return "".join(out)
+
+
+def _js_string_replace(text: str, search: str, replacement: str, *, replace_all: bool) -> str | None:
+    if len(text) > 500_000 or len(search) > 500_000:
+        return None
+
+    def subst(pos: int) -> str:
+        return _js_get_substitution(replacement, search, text, pos)
+
+    if not replace_all:
+        idx = text.find(search)
+        if idx < 0:
+            return text
+        piece = subst(idx)
+        if len(text) - len(search) + len(piece) > 2_000_000:
+            return None
+        return text[:idx] + piece + text[idx + len(search) :]
+
+    parts: list[str] = []
+    total = 0
+    if search == "":
+        for index in range(len(text) + 1):
+            piece = subst(index)
+            total += len(piece)
+            if total + len(text) > 2_000_000:
+                return None
+            parts.append(piece)
+            if index < len(text):
+                parts.append(text[index])
+        return "".join(parts)
+
+    pos = 0
+    while True:
+        idx = text.find(search, pos)
+        if idx < 0:
+            total += len(text) - pos
+            if total > 2_000_000:
+                return None
+            parts.append(text[pos:])
+            break
+        piece = subst(idx)
+        total += (idx - pos) + len(piece)
+        if total > 2_000_000:
+            return None
+        parts.append(text[pos:idx])
+        parts.append(piece)
+        pos = idx + len(search)
+    return "".join(parts)
+
+
 def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
     name = prop
     py = recv.py
     if isinstance(py, str):
         if name == "charAt" and values and _is_num(values[0].py):
-            i = int(values[0].py)
+            i = _js_int_or_none(values[0].py)
+            if i is None:
+                return None
             return Value(py[i] if 0 <= i < len(py) else "")
         if name == "charCodeAt" and values and _is_num(values[0].py):
-            i = int(values[0].py)
+            i = _js_int_or_none(values[0].py)
+            if i is None:
+                return None
             if 0 <= i < len(py):
                 return Value(ord(py[i]))
             return None
@@ -1249,13 +1342,28 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         if name in {"slice", "substring", "substr"}:
             if not values or not _is_num(values[0].py):
                 return None
-            start = int(values[0].py)
-            end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
+            start = _js_int_or_none(values[0].py)
+            if start is None:
+                return None
             if name == "substr":
+                # Legacy substr: a negative length is 0, not a Python end index.
                 if start < 0:
                     start = max(len(py) + start, 0)
-                length = end
-                return Value(py[start:] if length is None else py[start : start + length])
+                if len(values) < 2:
+                    return Value(py[start:])
+                length = _js_int_or_none(values[1].py)
+                if length is None:
+                    return None
+                if length < 0:
+                    length = 0
+                return Value(py[start : start + length])
+            end = None
+            if len(values) > 1:
+                if not _is_num(values[1].py):
+                    return None
+                end = _js_int_or_none(values[1].py)
+                if end is None:
+                    return None
             return Value(py[start:end])
         if name == "split":
             sep = values[0].py if values and isinstance(values[0].py, str) else None
@@ -1266,9 +1374,11 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
             parts = list(py) if sep == "" else py.split(sep)
             return Value([Value(p) for p in parts])
         if name == "replace" and len(values) >= 2 and isinstance(values[0].py, str) and isinstance(values[1].py, str):
-            return Value(py.replace(values[0].py, values[1].py, 1))
+            replaced = _js_string_replace(py, values[0].py, values[1].py, replace_all=False)
+            return Value(replaced) if replaced is not None else None
         if name == "replaceAll" and len(values) >= 2 and isinstance(values[0].py, str) and isinstance(values[1].py, str):
-            return Value(py.replace(values[0].py, values[1].py))
+            replaced = _js_string_replace(py, values[0].py, values[1].py, replace_all=True)
+            return Value(replaced) if replaced is not None else None
         if name == "toLowerCase":
             return Value(py.lower())
         if name == "toUpperCase":
@@ -1276,10 +1386,24 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         if name == "toString":
             return Value(py)
         if name == "indexOf" and values and isinstance(values[0].py, str):
-            return Value(py.find(values[0].py))
+            if len(py) > 500_000:
+                return None
+            start = 0
+            if len(values) > 1:
+                if not _is_num(values[1].py):
+                    return None
+                parsed = _js_int_or_none(values[1].py)
+                if parsed is None:
+                    return None
+                start = parsed
+            if start < 0:
+                start = 0
+            elif start > len(py):
+                start = len(py)
+            return Value(py.find(values[0].py, start))
         if name == "repeat" and values and _is_num(values[0].py):
-            n = int(values[0].py)
-            if n < 0 or n * len(py) > 2_000_000:
+            n = _js_int_or_none(values[0].py)
+            if n is None or n < 0 or n * len(py) > 2_000_000:
                 return None
             return Value(py * n)
     if isinstance(py, list):
@@ -1298,14 +1422,29 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
                     out.append(val)
             return Value(out)
         if name == "slice" and values and _is_num(values[0].py):
-            start = int(values[0].py)
-            end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
+            start = _js_int_or_none(values[0].py)
+            if start is None:
+                return None
+            end = None
+            if len(values) > 1:
+                if not _is_num(values[1].py):
+                    return None
+                end = _js_int_or_none(values[1].py)
+                if end is None:
+                    return None
             return Value(py[start:end])
     if _is_num(py) and name == "toString":
-        radix = int(values[0].py) if values and _is_num(values[0].py) else 10
+        if values and _is_num(values[0].py):
+            radix = _js_int_or_none(values[0].py)
+            if radix is None:
+                return None
+        else:
+            radix = 10
         if radix < 2 or radix > 36:
             return None
-        n = int(py)
+        n = _js_int_or_none(py)
+        if n is None:
+            return None
         if radix == 10:
             return Value(str(n))
         chars = "0123456789abcdefghijklmnopqrstuvwxyz"
