@@ -692,12 +692,10 @@ def _eval_template(node, source: str, env: FoldEnv | None) -> Value | None:
             val = const_eval(inner, source, env)
             if val is None or val.splice_raw:
                 return None
-            if isinstance(val.py, bool):
-                parts.append("true" if val.py else "false")
-            elif val.py is None:
-                parts.append("null")
-            else:
-                parts.append(str(val.py))
+            rendered = _js_to_string(val.py)
+            if rendered is None:
+                return None
+            parts.append(rendered)
             continue
         raw = node_text(source, child)
         if child.type in {"string_fragment", "escape_sequence"}:
@@ -812,6 +810,59 @@ def _binary_op(node) -> str | None:
     return None
 
 
+def _js_number_to_string(value: int | float) -> str:
+    """JavaScript Number ToString, not Python's float formatting."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value == 0:
+            return "0"
+        # |n| < 1e21 prints as a decimal integer. 1e21 itself is "1e+21".
+        if value.is_integer() and abs(value) < 1e21:
+            return str(int(value))
+    # Python zero-pads the exponent (`1e-07`); JavaScript does not (`1e-7`).
+    return re.sub(r"e([+-])0+(\d)", r"e\1\2", str(value))
+
+
+def _js_to_string(value: Any) -> str | None:
+    """JavaScript ToString for values that `+` and `join` actually coerce."""
+    if isinstance(value, Value):
+        return _js_to_string(value.py)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            py = item.py if isinstance(item, Value) else item
+            # Array toString turns null and undefined into empty slots.
+            if py is None:
+                parts.append("")
+                continue
+            rendered = _js_to_string(py)
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        return ",".join(parts)
+    if _is_num(value):
+        return _js_number_to_string(value)
+    return None
+
+
+def _js_plus_concatenates(left: Any, right: Any) -> bool:
+    """True when `+` string-concatenates instead of adding numbers.
+
+    Booleans and null stay numeric unless the other operand is already a
+    string (or an array, whose primitive value is a string).
+    """
+    return any(isinstance(side, (str, list)) for side in (left, right))
+
+
 def _eval_js_concat_chain(node, source: str, env: FoldEnv | None) -> Value | None:
     pieces = []
     cur = node
@@ -833,8 +884,12 @@ def _eval_js_concat_chain(node, source: str, env: FoldEnv | None) -> Value | Non
         return Value("".join(v.py for v in values))
     acc = values[0]
     for nxt in values[1:]:
-        if isinstance(acc.py, str) or isinstance(nxt.py, str):
-            acc = Value(str(acc.py) + str(nxt.py))
+        if _js_plus_concatenates(acc.py, nxt.py):
+            left = _js_to_string(acc.py)
+            right = _js_to_string(nxt.py)
+            if left is None or right is None:
+                return None
+            acc = Value(left + right)
         elif _is_num(acc.py) and _is_num(nxt.py):
             acc = Value(acc.py + nxt.py)
         else:
@@ -1286,7 +1341,16 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         items = [x.py if isinstance(x, Value) else x for x in py]
         if name == "join":
             sep = values[0].py if values and isinstance(values[0].py, str) else ","
-            return Value(sep.join("" if v is None else str(v) for v in items))
+            parts: list[str] = []
+            for item in items:
+                if item is None:
+                    parts.append("")
+                    continue
+                rendered = _js_to_string(item)
+                if rendered is None:
+                    return None
+                parts.append(rendered)
+            return Value(sep.join(parts))
         if name == "reverse":
             return Value(list(reversed(py)))
         if name == "concat":
