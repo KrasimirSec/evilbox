@@ -91,6 +91,206 @@ def php_open_tag_length(source: str, index: int) -> int | None:
     return 2
 
 
+# Statement openers. A line that begins with one of these is tagless PHP, not HTML prose.
+_PHP_LINE_KEYWORDS = frozenset(
+    {
+        "abstract",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "declare",
+        "default",
+        "die",
+        "do",
+        "echo",
+        "elseif",
+        "endfor",
+        "endforeach",
+        "endif",
+        "endswitch",
+        "endwhile",
+        "enum",
+        "exit",
+        "finally",
+        "fn",
+        "for",
+        "foreach",
+        "function",
+        "global",
+        "goto",
+        "if",
+        "include",
+        "include_once",
+        "interface",
+        "match",
+        "namespace",
+        "print",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "require",
+        "require_once",
+        "return",
+        "static",
+        "switch",
+        "throw",
+        "trait",
+        "try",
+        "unset",
+        "use",
+        "var",
+        "while",
+        "yield",
+    }
+)
+
+
+def php_uses_html_grammar(source: str) -> bool:
+    """True when the file is HTML with embedded PHP, not a tagless PHP program.
+
+    A `<?` inside a string or comment is not an open tag. Choosing the mixed
+    grammar for that file makes the parser treat the literal as live code.
+    """
+    n = len(source)
+    i = 0
+    while i < n and source[i] in "\ufeff \t\r\n":
+        i += 1
+    if i < n and source.startswith("<?", i):
+        return True
+
+    saw_php = False
+    in_sq = False
+    in_dq = False
+    in_line = False
+    in_block = False
+    line_start = True
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if in_line:
+            if ch == "\n":
+                in_line = False
+                line_start = True
+            i += 1
+            continue
+        if in_block:
+            if ch == "*" and nxt == "/":
+                i += 2
+                in_block = False
+                line_start = False
+                continue
+            line_start = ch == "\n"
+            i += 1
+            continue
+        if in_sq:
+            if ch == "\\" and nxt:
+                i += 2
+                line_start = False
+                continue
+            if ch == "'":
+                in_sq = False
+            line_start = ch == "\n"
+            i += 1
+            continue
+        if in_dq:
+            if ch == "\\" and nxt:
+                i += 2
+                line_start = False
+                continue
+            if ch == '"':
+                in_dq = False
+            line_start = ch == "\n"
+            i += 1
+            continue
+
+        if ch in " \t\r":
+            i += 1
+            continue
+        if ch == "\n":
+            line_start = True
+            i += 1
+            continue
+
+        if line_start and ch == "/" and nxt == "/":
+            saw_php = True
+            in_line = True
+            i += 2
+            line_start = False
+            continue
+        if line_start and ch == "#":
+            saw_php = True
+            in_line = True
+            i += 1
+            line_start = False
+            continue
+        if line_start and ch == "/" and nxt == "*":
+            saw_php = True
+            in_block = True
+            i += 2
+            line_start = False
+            continue
+        if line_start and ch == "'":
+            saw_php = True
+            in_sq = True
+            line_start = False
+            i += 1
+            continue
+        if line_start and ch == '"':
+            saw_php = True
+            in_dq = True
+            line_start = False
+            i += 1
+            continue
+        if saw_php and ch == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            line_start = False
+            continue
+        if saw_php and ch == "#":
+            in_line = True
+            i += 1
+            line_start = False
+            continue
+        if saw_php and ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            line_start = False
+            continue
+        if saw_php and ch == "'":
+            in_sq = True
+            line_start = False
+            i += 1
+            continue
+        if saw_php and ch == '"':
+            in_dq = True
+            line_start = False
+            i += 1
+            continue
+        if source.startswith("<?", i):
+            return not saw_php
+        if ch == "$" and (nxt.isalpha() or nxt == "_"):
+            saw_php = True
+            line_start = False
+            i += 1
+            continue
+        if line_start and (ch.isalpha() or ch == "_"):
+            j = i + 1
+            while j < n and (source[j].isalnum() or source[j] == "_"):
+                j += 1
+            if source[i:j].lower() in _PHP_LINE_KEYWORDS:
+                saw_php = True
+            line_start = False
+            i = j
+            continue
+        line_start = False
+        i += 1
+    return False
+
+
 def use_source_encoding(source: str):
     return _ENCODING.set(source_encoding(source))
 

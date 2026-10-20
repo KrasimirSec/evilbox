@@ -296,6 +296,35 @@ def test_php_payload_assignment_kept_when_still_read():
     assert blob in result.text
 
 
+def test_tagless_php_open_tag_inside_string_is_not_live_code():
+    """A `<?php` inside a string must not select the HTML grammar.
+
+    Tagless eval bodies store the next stage in a literal. The mixed grammar
+    treats that literal as code, folds the decoder, and breaks the quotes.
+    """
+    inner = 'echo "hi";'
+    blob = base64.b64encode(inner.encode()).decode()
+    src = (
+        f'$code = "<?php eval(base64_decode(\'{blob}\'));";\n'
+        '$marker = "SURVIVE";\n'
+        "echo $marker;\n"
+    )
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert blob in result.text
+    assert "SURVIVE" in result.text
+    assert 'echo "hi"' not in result.text
+    assert "echo 'hi'" not in result.text
+
+
+def test_html_before_php_tag_still_decodes():
+    src = 'Welcome\n<?php echo "from-html";\n'
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "from-html" in result.text
+    assert "Welcome" in result.text
+
+
 def test_fixture_js_fromcharcode():
     src = (FIXTURES / "fromcharcode.js").read_text(encoding="utf-8")
     result = deobfuscate(src, language="auto", path=str(FIXTURES / "fromcharcode.js"))

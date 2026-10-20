@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from evilbox.rewrite import php_open_tag_length
+from evilbox.rewrite import php_open_tag_length, php_uses_html_grammar
 
 
 def pretty_php(source: str) -> str:
@@ -15,7 +15,7 @@ def pretty_php(source: str) -> str:
     in_line_comment = False
     in_block_comment = False
     heredoc_end: str | None = None
-    in_php = not (source.lstrip().startswith("<?") or "<?" in source[:200])
+    in_php = not php_uses_html_grammar(source)
 
     def write_indent() -> None:
         nonlocal bol
