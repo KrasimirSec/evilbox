@@ -346,12 +346,18 @@ def _rotate_string_arrays(tree, source: str, env: FoldEnv) -> None:
         body = node_text(source, inner)
         if "push" not in body or "shift" not in body:
             continue
+        # `rot(++n)` passes n+1. `while (--t)` then runs n times; `while (t--)` runs n+1.
+        params = _function_param_names(inner, source)
+        count_name = params[1] if len(params) > 1 else None
+        count_bumped = bool(
+            count_name and re.search(r"\+\+\s*" + re.escape(count_name) + r"\b", body)
+        )
         if re.search(r"\+\+\s*[A-Za-z_$]", body) and re.search(r"while\s*\(\s*--", body):
             rot = n
         elif re.search(r"while\s*\(\s*--", body):
             rot = max(0, n - 1)
-        elif re.search(r"while\s*\(\s*[A-Za-z_$][\w$]*\s*--", body):
-            rot = n
+        elif re.search(r"while\s*\(\s*[A-Za-z_$][\w$]*\s*--", body) and count_bumped:
+            rot = n + 1
         else:
             rot = n
         items = items
