@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -1286,6 +1287,32 @@ def _eval_concat_chain(node, source: str, env: FoldEnv | None) -> Value | None:
     return Value("".join(out))
 
 
+def _php_remainder(left: Any, right: Any) -> int | None:
+    """PHP `%` casts both operands to int, then uses a truncating remainder.
+
+    The sign follows the dividend. Python's `%` follows the divisor, so
+    `-5 % 2` must stay `-1` (PHP) rather than become `1`.
+    """
+
+    def as_int(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value) or abs(value) > 2**63 - 1:
+                return None
+            return math.trunc(value)
+        return value
+
+    a = as_int(left)
+    b = as_int(right)
+    if a is None or b is None or b == 0:
+        return None
+    quot = abs(a) // abs(b)
+    if (a < 0) != (b < 0):
+        quot = -quot
+    return a - b * quot
+
+
 def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     op = _binary_op(node, source)
     if op == ".":
@@ -1332,11 +1359,8 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
                     return Value(lv.py // rv.py)
                 return Value(result)
             if op == "%":
-                if isinstance(lv.py, int) and isinstance(rv.py, int):
-                    if rv.py == 0:
-                        return None
-                    return Value(lv.py % rv.py)
-                return Value(lv.py % rv.py)
+                rem = _php_remainder(lv.py, rv.py)
+                return None if rem is None else Value(rem)
         except Exception:
             return None
     return None
