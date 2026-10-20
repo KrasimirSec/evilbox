@@ -12,6 +12,24 @@ from evilbox.pipeline import deobfuscate
 from evilbox.signature import STRING_LIT_RE, extract_surface
 
 
+def test_php_intval_base_keeps_hex_payload_bytes():
+    """chr(intval("41", 16)) is "A". Base 10 made it ")" and hid the live branch."""
+    src = (
+        '<?php $s = chr(intval("41", 16)) . chr(intval("42", 16));'
+        ' if ($s === "AB") { echo "PAYLOAD"; } else { echo "DECOY"; }'
+    )
+    result = deobfuscate(src, language="php")
+    compact = result.text.replace(" ", "")
+    assert "'AB'" in compact
+    assert "')*'" not in compact
+    assert "PAYLOAD" in result.text
+    untouched = deobfuscate('<?php echo intval(10, 16); echo intval("10", 99);', language="php")
+    compact_untouched = untouched.text.replace(" ", "")
+    assert "intval(10,16)" not in compact_untouched
+    assert "echo10;" in compact_untouched
+    assert "intval('10',99)" in compact_untouched
+
+
 def test_php_reassignment_is_not_folded():
     src = "<?php $a='base64_decode'; echo $a('aGVsbG8='); $a='strrev';"
     result = deobfuscate(src, language="php")
