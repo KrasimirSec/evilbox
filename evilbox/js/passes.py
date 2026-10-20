@@ -701,9 +701,9 @@ def _eval_template(node, source: str, env: FoldEnv | None) -> Value | None:
             continue
         raw = node_text(source, child)
         if child.type in {"string_fragment", "escape_sequence"}:
-            parts.append(unescape_js_string_body(raw))
+            parts.append(unescape_js_string_body(raw, line_continuations=True))
         elif raw not in {"`", "${", "}"}:
-            parts.append(unescape_js_string_body(raw))
+            parts.append(unescape_js_string_body(raw, line_continuations=True))
     return Value("".join(parts))
 
 
