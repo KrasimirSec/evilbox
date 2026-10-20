@@ -9,6 +9,8 @@ from evilbox.decode import (
     MAX_CODEC_OUTPUT,
     expand_php_charlist,
     gzip_bytes,
+    parse_js_quoted_string,
+    parse_quoted_string,
     php_bitwise_not,
     php_str_pad,
     php_string_bytes,
@@ -109,3 +111,19 @@ def test_php_differential_property_folds():
         raw = "".join(rng.choice(chars) for _ in range(rng.randint(1, 12)))
         php_val = php_eval_json("~" + _php_quote(raw))
         assert php_val == php_bitwise_not(raw)
+
+
+def test_leading_zero_octal_escapes():
+    """`\\072` is `:`, not a NUL followed by the digits 72."""
+    assert parse_quoted_string(r'"\040"') == " "
+    assert parse_quoted_string(r'"\012"') == "\n"
+    assert parse_quoted_string(r'"\000"') == "\0"
+    assert parse_quoted_string(r'"\0"') == "\0"
+    assert parse_quoted_string(r'"\08"') == "\x008"
+    assert parse_quoted_string(r'"\072\057"') == ":/"
+    assert parse_quoted_string(r'"\400"') == "\0"
+    assert parse_quoted_string(r'"\101"') == "A"
+    assert parse_js_quoted_string(r'"\040"') == " "
+    assert parse_js_quoted_string(r'"\0"') == "\0"
+    assert parse_js_quoted_string(r'"\08"') == "\x008"
+    assert parse_js_quoted_string(r'"\400"') == "\u0100"

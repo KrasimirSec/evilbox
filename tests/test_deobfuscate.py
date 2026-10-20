@@ -146,6 +146,15 @@ echo 1;
     assert result.failed_folds is False
 
 
+def test_php_octal_url_is_not_split_into_nuls():
+    src = '<?php $u = "\\150\\164\\164\\160\\072\\057\\057\\145\\166\\151\\154\\056\\145\\170\\141\\155\\160\\154\\145";\n'
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "http://evil.example" in result.text
+    assert "\\x0072" not in result.text
+    assert "\\x0057" not in result.text
+
+
 def test_php_control_char_string_fold_stays_parseable():
     """Folding "\\x00" must not emit a raw NUL that the parser then rejects."""
     inner = r"""$search = array("\x00", "\x0a", "\x0d", "\x1a"); echo $search[0];"""
