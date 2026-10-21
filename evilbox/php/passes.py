@@ -1083,6 +1083,19 @@ def _format_value(val: Value) -> str | None:
                 return None
             parts.append(rendered)
         return f"array({', '.join(parts)})"
+    if isinstance(val.py, dict):
+        parts = []
+        for key, item in val.py.items():
+            rendered = _format_value(item if isinstance(item, Value) else Value(item))
+            if rendered is None:
+                return None
+            if isinstance(key, str):
+                parts.append(f"{php_quote(key)} => {rendered}")
+            elif isinstance(key, int) and not isinstance(key, bool):
+                parts.append(f"{key} => {rendered}")
+            else:
+                return None
+        return "array(" + ", ".join(parts) + ")"
     if isinstance(val.py, str):
         try:
             php_string_bytes(val.py)
@@ -1524,16 +1537,17 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return Value(data) if data is not None else None
 
     if name == "unpack" and len(values) >= 2:
+        # The third argument is a start offset. Ignoring it would decode the wrong bytes.
+        if len(values) > 2:
+            return None
         fmt = as_str(values[0])
         data = as_bytes(values[1])
         if fmt is None or data is None:
             return None
-        kind = fmt.replace("'", "").rstrip("0123456789*")
-        if kind in {"H", "h"}:
-            return Value(data.hex())
-        if kind == "a":
-            text = bytes_to_text(data)
-            return Value(text if text is not None else data.decode("latin-1"))
+        fields = _unpack_one(fmt, data)
+        if fields is None:
+            return None
+        return Value({key: Value(text) for key, text in fields.items()})
 
     if name == "chr" and values and _is_num(values[0].py):
         return Value(chr(int(values[0].py) & 0xFF))
@@ -1887,6 +1901,63 @@ def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None
     return None
 
 
+# One unpack code: type, optional repeat (`*` or a count), optional name.
+# `H*` / `a*` are the forms that hide a payload behind `[1]`.
+_UNPACK_ONE_RE = re.compile(r"^([aAhH])(\d+|\*)?([A-Za-z_][A-Za-z0-9_]*)?$")
+
+
+def _unpack_one(fmt: str, data: bytes) -> dict[Any, str] | None:
+    """PHP `unpack` of a single `a`/`A`/`h`/`H` code.
+
+    The result is a one-element map. With no name the key is `1`, so
+    `unpack("H*", $bin)[1]` is the whole hex string rather than one character.
+    """
+    text = fmt.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1]
+    if not text or "/" in text:
+        return None
+    match = _UNPACK_ONE_RE.fullmatch(text)
+    if match is None:
+        return None
+    code, count_txt, name = match.group(1), match.group(2), match.group(3)
+    key: Any = name if name else 1
+    if code in {"H", "h"}:
+        count = len(data) * 2 if count_txt == "*" else (1 if count_txt is None else int(count_txt))
+        if count < 0 or (count + 1) // 2 > len(data):
+            return None
+        nibbles: list[str] = []
+        for byte in data[: (count + 1) // 2]:
+            high = f"{byte >> 4:x}"
+            low = f"{byte & 0xF:x}"
+            pair = (high, low) if code == "H" else (low, high)
+            nibbles.extend(pair)
+        return {key: "".join(nibbles)[:count]}
+    count = len(data) if count_txt == "*" else (1 if count_txt is None else int(count_txt))
+    if count < 0 or count > len(data):
+        return None
+    chunk = data[:count]
+    pad = 0 if code == "a" else 0x20
+    end = len(chunk)
+    while end > 0 and chunk[end - 1] == pad:
+        end -= 1
+    return {key: chunk[:end].decode("latin-1")}
+
+
+def _map_get(mapping: dict, key: Any) -> Value | None:
+    item = mapping.get(key)
+    if item is None and isinstance(key, int) and not isinstance(key, bool):
+        item = mapping.get(str(key))
+    elif item is None and isinstance(key, str) and key.isascii() and key.lstrip("-").isdigit():
+        try:
+            item = mapping.get(int(key))
+        except ValueError:
+            item = None
+    if item is None:
+        return None
+    return item if isinstance(item, Value) else Value(item)
+
+
 def _preg_eval_modifier(pattern: str) -> bool:
     if len(pattern) < 3:
         return False
@@ -1926,9 +1997,19 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         return None
     name = node_text(source, obj).lstrip("$") if obj.type == "variable_name" else None
     reached = env.reaching(obj, name) if env is not None and name else None
-    if isinstance(idx_val.py, str) and reached is not None and isinstance(reached.py, dict):
-        item = reached.py.get(idx_val.py)
-        return item if isinstance(item, Value) or item is None else Value(item)
+    container = reached
+    if (
+        (container is None or not isinstance(container.py, dict))
+        and obj.type != "variable_name"
+    ):
+        evaluated = const_eval(obj, source, env)
+        if evaluated is not None and isinstance(evaluated.py, dict):
+            container = evaluated
+    if container is not None and isinstance(container.py, dict):
+        key = idx_val.py
+        if _is_num(key) and not isinstance(key, bool):
+            key = int(key)
+        return _map_get(container.py, key)
     if not _is_num(idx_val.py):
         return None
     idx = int(idx_val.py)
@@ -1943,10 +2024,6 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     elems = None
     if reached is not None and isinstance(reached.py, list):
         elems = reached.py
-    elif reached is not None and isinstance(reached.py, dict):
-        item = reached.py.get(idx)
-        if item is not None:
-            return item if isinstance(item, Value) else Value(item)
     elif obj.type == "array_creation_expression":
         elems = _php_array_elements(obj, source, env)
     if elems is None or idx < 0 or idx >= len(elems):
