@@ -296,6 +296,40 @@ def test_php_payload_assignment_kept_when_still_read():
     assert blob in result.text
 
 
+def test_php_unpack_hex_index_restores_payload():
+    """unpack() is a 1-based array. Index 1 is the whole field, not one character."""
+    payload = "echo 'LIVE';"
+    blob = base64.b64encode(payload.encode()).decode()
+    direct = (
+        "<?php $b = base64_decode('"
+        + blob
+        + "'); eval(hex2bin(unpack('H*', $b)[1]));"
+    )
+    named = (
+        "<?php $b = base64_decode('"
+        + blob
+        + "'); $u = unpack('H*hex', $b); eval(hex2bin($u['hex']));"
+    )
+    for src in (direct, named):
+        result = deobfuscate(src, language="php")
+        assert "LIVE" in result.text
+        assert "hex2bin" not in result.text
+        assert "unpack" not in result.text
+
+
+def test_php_unpack_honors_width_and_nibble_order():
+    wide = deobfuscate("<?php echo unpack('H*', 'AB')[1];", language="php")
+    assert "4142" in wide.text
+    assert "4142'[1]" not in wide.text.replace(" ", "")
+    narrow = deobfuscate("<?php echo unpack('H2', 'AB')[1];", language="php")
+    assert "41" in narrow.text
+    assert "4142" not in narrow.text
+    low = deobfuscate("<?php echo unpack('h*', chr(171))[1];", language="php")
+    assert "ba" in low.text
+    short = deobfuscate("<?php echo unpack('H4', 'A')[1];", language="php")
+    assert "unpack" in short.text
+
+
 def test_fixture_js_fromcharcode():
     src = (FIXTURES / "fromcharcode.js").read_text(encoding="utf-8")
     result = deobfuscate(src, language="auto", path=str(FIXTURES / "fromcharcode.js"))
