@@ -73,6 +73,112 @@ def test_huge_shift_does_not_raise():
     assert "<<" in result.text
 
 
+def _php_statements(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def test_php_array_overwrite_keeps_last_key():
+    """A later explicit key replaces the earlier element. eval must run that payload."""
+    src = """<?php
+$p = array("echo 'DECOY';", 0 => "echo 'REAL';");
+eval($p[0]);
+"""
+    result = deobfuscate(src, language="php")
+    statements = _php_statements(result.text)
+    assert "echo 'REAL';" in statements
+    assert "echo 'DECOY';" not in statements
+    assert "eval(" not in result.text
+
+
+def test_php_numeric_string_key_is_the_same_slot():
+    src = """<?php
+$p = array("0" => "echo 'DECOY';", 0 => "echo 'REAL';");
+eval($p["0"]);
+"""
+    result = deobfuscate(src, language="php")
+    statements = _php_statements(result.text)
+    assert "echo 'REAL';" in statements
+    assert "echo 'DECOY';" not in statements
+
+
+def test_php_array_autoindex_after_explicit_key():
+    src = """<?php
+$p = array(0 => "echo 'FIRST';", "echo 'SECOND';");
+eval($p[1]);
+"""
+    result = deobfuscate(src, language="php")
+    assert "echo 'SECOND';" in _php_statements(result.text)
+    assert "eval(" not in result.text
+
+
+def test_php_array_hole_does_not_read_another_slot():
+    src = """<?php
+$p = array(2 => "echo 'A';", "echo 'B';");
+eval($p[0]);
+eval($p[2]);
+eval($p[3]);
+"""
+    result = deobfuscate(src, language="php")
+    compact = result.text.replace(" ", "")
+    assert "eval($p[0])" in compact
+    assert "echo 'A';" in _php_statements(result.text)
+    assert "echo 'B';" in _php_statements(result.text)
+
+
+def test_php_implode_keeps_keyed_elements():
+    src = "<?php $y = implode('', array(1 => 'h', 'i'));"
+    result = deobfuscate(src, language="php")
+    assert "'hi'" in result.text.replace(" ", "")
+    assert "'i'" not in result.text.replace(" ", "").replace("'hi'", "")
+
+
+def test_php_nested_keyed_array_is_not_python_repr():
+    src = """<?php $a = array(1 => array(2 => "echo 'REAL';")); eval($a[1][2]);"""
+    result = deobfuscate(src, language="php")
+    assert "Value(" not in result.text
+    assert "echo 'REAL';" in _php_statements(result.text)
+    assert "eval(" not in result.text
+
+
+def test_php_array_key_casts_leave_non_decimal_strings():
+    src = """<?php
+$p = array("01" => "echo 'ZERO';", 1 => "echo 'ONE';", "+1" => "echo 'PLUS';");
+eval($p["01"]);
+eval($p[1]);
+eval($p["+1"]);
+"""
+    result = deobfuscate(src, language="php")
+    statements = _php_statements(result.text)
+    assert "echo 'ZERO';" in statements
+    assert "echo 'ONE';" in statements
+    assert "echo 'PLUS';" in statements
+    assert "eval(" not in result.text
+
+
+def test_php_negative_array_key_then_append():
+    src = """<?php
+$p = array(-1 => "echo 'NEG';", "echo 'ZERO';");
+eval($p[0]);
+eval($p[-1]);
+"""
+    result = deobfuscate(src, language="php")
+    statements = _php_statements(result.text)
+    assert "echo 'ZERO';" in statements
+    assert "echo 'NEG';" in statements
+    assert "eval(" not in result.text
+
+
+def test_php_float_and_bool_array_keys_truncate():
+    src = """<?php
+$a = array(1.9 => "echo 'FLOAT';", true => "echo 'BOOL';");
+eval($a[1]);
+"""
+    result = deobfuscate(src, language="php")
+    # true and 1.9 are both key 1; the later bool write wins.
+    assert "echo 'BOOL';" in _php_statements(result.text)
+    assert "echo 'FLOAT';" not in _php_statements(result.text)
+
+
 def test_batch_isolates_failures_and_unique_names(tmp_path):
     root = tmp_path / "samples"
     (root / "a").mkdir(parents=True)

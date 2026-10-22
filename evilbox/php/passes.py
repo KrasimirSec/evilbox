@@ -533,19 +533,17 @@ def collect_env(tree, source: str) -> FoldEnv:
                 env.drop(left, name)
                 continue
             if right.type == "array_creation_expression":
-                elems, keyed = _php_array_parts(right, source, env)
-                value: Value | None = None
-                if keyed and elems is None:
-                    value = Value(keyed)
-                    env.keyed_arrays[key] = keyed
+                stored = _php_array_value(right, source, env)
+                value = Value(stored) if stored is not None else None
+                if isinstance(stored, list):
+                    env.arrays[key] = stored
+                    env.keyed_arrays.pop(key, None)
+                elif isinstance(stored, dict):
+                    env.keyed_arrays[key] = stored
                     env.arrays.pop(key, None)
-                elif elems is not None:
-                    value = Value(elems)
-                    env.arrays[key] = elems
-                    if keyed:
-                        env.keyed_arrays[key] = keyed
-                    else:
-                        env.keyed_arrays.pop(key, None)
+                else:
+                    env.arrays.pop(key, None)
+                    env.keyed_arrays.pop(key, None)
                 env.record(node, name, value, False)
                 env.scalars.pop(key, None)
                 env.concat_rhs.pop(key, None)
@@ -863,38 +861,103 @@ def _concat_collapse_replacements(source: str, env: FoldEnv, quote_fn) -> list[t
     return out
 
 
-def _php_array_parts(
-    node, source: str, env: FoldEnv | None
-) -> tuple[list[Value] | None, dict[Any, Value] | None]:
-    elems: list[Value] = []
-    keyed: dict[Any, Value] = {}
-    saw_list = False
+# PHP array keys are 64-bit. A wider integer is left unfolded.
+_PHP_INT_MIN = -9223372036854775808
+_PHP_INT_MAX = 9223372036854775807
+_PHP_DECIMAL_KEY = re.compile(r"-?(?:0|[1-9][0-9]*)")
+
+
+def _php_array_key(value: Any) -> Any | None:
+    """Cast a value the way PHP casts an array key.
+
+    ``"8"`` and ``8`` are the same slot. ``"08"`` and ``"+1"`` stay strings.
+    Floats truncate toward zero. The last write to a slot wins.
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        if _PHP_INT_MIN <= value <= _PHP_INT_MAX:
+            return value
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        truncated = int(value)
+        if _PHP_INT_MIN <= truncated <= _PHP_INT_MAX:
+            return truncated
+        return None
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        if _PHP_DECIMAL_KEY.fullmatch(value):
+            try:
+                number = int(value, 10)
+            except ValueError:
+                return value
+            if _PHP_INT_MIN <= number <= _PHP_INT_MAX:
+                return number
+        return value
+    return None
+
+
+def _php_sequence(value: Any) -> list[Any] | None:
+    """Values of a PHP array in insertion order."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return list(value.values())
+    return None
+
+
+def _php_array_get(container: Any, index: Any) -> Value | None:
+    key = _php_array_key(index)
+    if key is None:
+        return None
+    if isinstance(container, list):
+        if isinstance(key, int) and not isinstance(key, bool) and 0 <= key < len(container):
+            item = container[key]
+            return item if isinstance(item, Value) else Value(item)
+        return None
+    if isinstance(container, dict) and key in container:
+        item = container[key]
+        return item if isinstance(item, Value) else Value(item)
+    return None
+
+
+def _php_array_storage(mapping: dict[Any, Value]) -> list[Value] | dict[Any, Value]:
+    """Store a packed ``0..n-1`` map as a list. Every other map keeps its keys."""
+    if list(mapping) == list(range(len(mapping))):
+        return list(mapping.values())
+    return mapping
+
+
+def _php_array_value(node, source: str, env: FoldEnv | None) -> list[Value] | dict[Any, Value] | None:
+    """Evaluate an array literal with PHP key casting and automatic indexes."""
+    mapping: dict[Any, Value] = {}
+    next_index = 0
     for el in node.named_children:
         if el.type != "array_element_initializer":
-            continue
-        named = [c for c in el.named_children]
+            return None
+        named = list(el.named_children)
         if len(named) == 2:
             key_v = const_eval(named[0], source, env)
             val_v = const_eval(named[1], source, env)
             if key_v is None or val_v is None:
-                return None, None
-            if not isinstance(key_v.py, (str, int)) or isinstance(key_v.py, bool):
-                return None, None
-            keyed[key_v.py] = val_v
+                return None
+            key = _php_array_key(key_v.py)
+            if key is None:
+                return None
+            mapping[key] = val_v
+            if isinstance(key, int) and not isinstance(key, bool) and key >= next_index:
+                next_index = key + 1
             continue
         inner = named[0] if named else el
         item = const_eval(inner, source, env)
-        if item is None:
-            return None, None
-        elems.append(item)
-        saw_list = True
-    list_out = elems if saw_list or not keyed else None
-    return list_out, (keyed or None)
-
-
-def _php_array_elements(node, source: str, env: FoldEnv | None) -> list[Value] | None:
-    elems, _keyed = _php_array_parts(node, source, env)
-    return elems
+        if item is None or next_index > _PHP_INT_MAX:
+            return None
+        mapping[next_index] = item
+        next_index += 1
+    return _php_array_storage(mapping)
 
 
 def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str | None:
@@ -1083,6 +1146,20 @@ def _format_value(val: Value) -> str | None:
                 return None
             parts.append(rendered)
         return f"array({', '.join(parts)})"
+    if isinstance(val.py, dict):
+        parts = []
+        for key, item in val.py.items():
+            rendered = _format_value(item if isinstance(item, Value) else Value(item))
+            if rendered is None:
+                return None
+            if isinstance(key, str):
+                key_src = php_quote(key)
+            elif isinstance(key, int) and not isinstance(key, bool):
+                key_src = str(key)
+            else:
+                return None
+            parts.append(f"{key_src} => {rendered}")
+        return f"array({', '.join(parts)})"
     if isinstance(val.py, str):
         try:
             php_string_bytes(val.py)
@@ -1144,10 +1221,8 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return None
         return env.reaching(inner, val.py)
     if t == "array_creation_expression":
-        elems, keyed = _php_array_parts(node, source, env)
-        if keyed and elems is None:
-            return Value(keyed)
-        return Value(elems) if elems is not None else None
+        stored = _php_array_value(node, source, env)
+        return Value(stored) if stored is not None else None
     if t == "parenthesized_expression":
         inner = node.named_children[0] if node.named_children else None
         return const_eval(inner, source, env) if inner is not None else None
@@ -1439,7 +1514,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         values = values[1:]
     elif name == "call_user_func_array" and len(values) >= 2:
         cb = as_str(values[0])
-        items = values[1].py if isinstance(values[1].py, list) else None
+        items = _php_sequence(values[1].py)
         if not cb or items is None:
             return None
         name = cb.lstrip("\\").lower()
@@ -1596,9 +1671,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return None
 
         def as_list(val: Value) -> list[str] | None:
-            if isinstance(val.py, list):
+            seq = _php_sequence(val.py)
+            if seq is not None:
                 out: list[str] = []
-                for item in val.py:
+                for item in seq:
                     raw = as_str(item if isinstance(item, Value) else Value(item))
                     if raw is None:
                         return None
@@ -1639,14 +1715,16 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if name in {"implode", "join"} and values:
         glue = ""
         pieces: list[Any] | None = None
-        first = values[0].py
-        if isinstance(first, list):
+        first = _php_sequence(values[0].py)
+        if first is not None:
             pieces = first
             if len(values) > 1:
                 glue = as_str(values[1]) or ""
-        elif len(values) >= 2 and isinstance(values[1].py, list):
-            glue = as_str(values[0]) or ""
-            pieces = values[1].py
+        elif len(values) >= 2:
+            second = _php_sequence(values[1].py)
+            if second is not None:
+                glue = as_str(values[0]) or ""
+                pieces = second
         if pieces is None:
             return None
         parts = [_as_php_string(p.py if isinstance(p, Value) else p) for p in pieces]
@@ -1774,21 +1852,23 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
     if name == "array_map" and len(values) >= 2:
         cb = (as_str(values[0]) or "").lstrip("\\").lower()
-        items = values[1].py if isinstance(values[1].py, list) else None
+        items = _php_sequence(values[1].py)
         if cb and items is not None:
-            mapped: list[Value] = []
+            mapped_items: list[Value] = []
             for item in items:
                 applied = _eval_named(cb, [item if isinstance(item, Value) else Value(item)], source, env)
                 if applied is None:
-                    mapped = []
+                    mapped_items = []
                     break
-                mapped.append(applied)
-            if mapped:
-                return Value(mapped)
+                mapped_items.append(applied)
+            if mapped_items:
+                if isinstance(values[1].py, dict):
+                    return Value(dict(zip(values[1].py.keys(), mapped_items)))
+                return Value(mapped_items)
 
     if name in {"array_filter", "array_walk", "usort", "uasort", "uksort"} and len(values) >= 2:
         cb = (as_str(values[1]) or "").lstrip("\\").lower()
-        items = values[0].py if isinstance(values[0].py, list) else None
+        items = _php_sequence(values[0].py)
         if cb in {"assert", "eval"} and items:
             for item in items:
                 raw = as_str(item if isinstance(item, Value) else Value(item))
@@ -1926,9 +2006,13 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         return None
     name = node_text(source, obj).lstrip("$") if obj.type == "variable_name" else None
     reached = env.reaching(obj, name) if env is not None and name else None
-    if isinstance(idx_val.py, str) and reached is not None and isinstance(reached.py, dict):
-        item = reached.py.get(idx_val.py)
-        return item if isinstance(item, Value) or item is None else Value(item)
+    if reached is not None and isinstance(reached.py, (list, dict)):
+        return _php_array_get(reached.py, idx_val.py)
+    if obj.type == "array_creation_expression":
+        arr = const_eval(obj, source, env)
+        if arr is None or not isinstance(arr.py, (list, dict)):
+            return None
+        return _php_array_get(arr.py, idx_val.py)
     if not _is_num(idx_val.py):
         return None
     idx = int(idx_val.py)
@@ -1940,18 +2024,7 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         if 0 <= idx < len(reached.py):
             return Value(chr(reached.py[idx]))
         return None
-    elems = None
-    if reached is not None and isinstance(reached.py, list):
-        elems = reached.py
-    elif reached is not None and isinstance(reached.py, dict):
-        item = reached.py.get(idx)
-        if item is not None:
-            return item if isinstance(item, Value) else Value(item)
-    elif obj.type == "array_creation_expression":
-        elems = _php_array_elements(obj, source, env)
-    if elems is None or idx < 0 or idx >= len(elems):
-        return None
-    return elems[idx]
+    return None
 
 
 def _read_local_file(target: str, env: FoldEnv | None) -> str | None:
