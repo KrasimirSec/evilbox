@@ -116,6 +116,10 @@ class Value:
     splice_raw: bool = False
 
 
+# Empty array slot. Join turns it into "", and indexing it is `undefined`.
+_HOLE = object()
+
+
 @dataclass
 class DecoderInfo:
     array: str
@@ -249,15 +253,8 @@ def collect_env(tree, source: str) -> FoldEnv:
         if inside_loop(node) or inside_branch(node):
             continue
         if value.type == "array":
-            elems: list[Value] = []
-            ok = True
-            for el in value.named_children:
-                item = _array_element(el, source)
-                if item is None:
-                    ok = False
-                    break
-                elems.append(item)
-            if ok:
+            elems = _js_array_slots(value, source)
+            if elems is not None:
                 env.arrays[key] = elems
             continue
         if value.type == "identifier" and node_text(source, value) in KNOWN_GLOBALS:
@@ -384,15 +381,13 @@ def _collect_array_functions(tree, source: str, env: FoldEnv) -> None:
         for inner in walk(body):
             if inner.type != "array":
                 continue
-            elems: list[Value] = []
-            ok = True
-            for el in inner.named_children:
-                item = _array_element(el, source)
-                if item is None or item.splice_raw or not isinstance(item.py, str):
-                    ok = False
-                    break
-                elems.append(item)
-            if ok and elems and (best is None or len(elems) > len(best)):
+            elems = _js_array_slots(inner, source)
+            if (
+                elems
+                and any(isinstance(item.py, str) for item in elems)
+                and all(item.py is _HOLE or (isinstance(item.py, str) and not item.splice_raw) for item in elems)
+                and (best is None or len(elems) > len(best))
+            ):
                 best = elems
         if best:
             env.named_arrays[name] = best
@@ -561,6 +556,43 @@ def _array_element(node, source: str) -> Value | None:
     return const_eval(node, source, env=None)
 
 
+def _js_array_slots(node, source: str) -> list[Value] | None:
+    """Array slots, including holes.
+
+    `named_children` skips elisions, so `["a",,"b"]` used to become `["a","b"]`.
+    A comma after `[` or after another comma is a hole. A single trailing comma
+    is not: `[1,]` has one element and `[1,,]` has two.
+    """
+    slots: list[Value] = []
+    last = "["
+    for child in node.children:
+        if child.type in {"[", "]", "comment"}:
+            continue
+        if not child.is_named and child.type == ",":
+            if last in {"[", ","}:
+                slots.append(Value(_HOLE))
+            last = ","
+            continue
+        if not child.is_named:
+            continue
+        item = _array_element(child, source)
+        if item is None:
+            return None
+        slots.append(item)
+        last = "elem"
+    return slots
+
+
+def _array_slot(elems: list, idx: int) -> Value | None:
+    """Index an array. A hole is `undefined`, so the access stays unfolded."""
+    if idx < 0 or idx >= len(elems):
+        return None
+    item = elems[idx]
+    if isinstance(item, Value) and item.py is _HOLE:
+        return None
+    return item if isinstance(item, Value) else Value(item)
+
+
 def _parens_are_syntax(node) -> bool:
     """`if` / `while` / `switch` / `for` need the parentheses even when the test is constant."""
     parent = node.parent
@@ -617,12 +649,26 @@ def _simplified_string(node, source: str) -> str | None:
     return quoted
 
 
-def _format_value(val: Value) -> str:
+def _format_value(val: Value) -> str | None:
     if val.splice_raw and isinstance(val.py, str):
         return val.py
+    if val.py is _HOLE:
+        return None
     if isinstance(val.py, list):
-        parts = [_format_value(item if isinstance(item, Value) else Value(item)) for item in val.py]
-        return "[" + ", ".join(parts) + "]"
+        parts: list[str] = []
+        for item in val.py:
+            if isinstance(item, Value) and item.py is _HOLE:
+                parts.append("")
+                continue
+            rendered = _format_value(item if isinstance(item, Value) else Value(item))
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        body = ", ".join(parts)
+        # A trailing hole is a real slot. `[1,]` is length 1, `[1,,]` is length 2.
+        if val.py and isinstance(val.py[-1], Value) and val.py[-1].py is _HOLE:
+            body += ","
+        return "[" + body + "]"
     if isinstance(val.py, str):
         return js_quote(val.py)
     if isinstance(val.py, bool):
@@ -668,13 +714,8 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if t == "subscript_expression":
         return _eval_subscript(node, source, env)
     if t == "array":
-        elems: list[Value] = []
-        for el in node.named_children:
-            item = _array_element(el, source)
-            if item is None:
-                return None
-            elems.append(item)
-        return Value(elems)
+        elems = _js_array_slots(node, source)
+        return Value(elems) if elems is not None else None
     if t == "arguments":
         return None
     return None
@@ -725,21 +766,16 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
     idx = idx_val.py
     elems: list[Value] | None = None
     if obj.type == "array":
-        elems = []
-        for el in obj.named_children:
-            item = _array_element(el, source)
-            if item is None:
-                return None
-            elems.append(item)
+        elems = _js_array_slots(obj, source)
+        if elems is None:
+            return None
     elif obj.type == "identifier" and env is not None:
         name = node_text(source, obj)
         elems = env.arrays.get(env.key(obj, name))
         if elems is None:
             elems = env.array_by_name(name)
     if elems is not None:
-        if idx < 0 or idx >= len(elems):
-            return None
-        return elems[idx]
+        return _array_slot(elems, idx)
     recv = const_eval(obj, source, env)
     if recv is not None and isinstance(recv.py, str):
         if idx < 0:
@@ -747,9 +783,7 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         if 0 <= idx < len(recv.py):
             return Value(recv.py[idx])
     if recv is not None and isinstance(recv.py, list):
-        if 0 <= idx < len(recv.py):
-            item = recv.py[idx]
-            return item if isinstance(item, Value) else Value(item)
+        return _array_slot(recv.py, idx)
     return None
 
 
@@ -1111,10 +1145,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if idx is None:
             return None
         idx -= info.offset
-        if 0 <= idx < len(items):
-            item = items[idx]
-            return _decode_array_item(item, info.encoding, values)
-        return None
+        item = _array_slot(items, idx)
+        if item is None:
+            return None
+        return _decode_array_item(item, info.encoding, values)
 
     if obj == "eval" and prop is None:
         if values and isinstance(values[0].py, str):
@@ -1286,7 +1320,7 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         items = [x.py if isinstance(x, Value) else x for x in py]
         if name == "join":
             sep = values[0].py if values and isinstance(values[0].py, str) else ","
-            return Value(sep.join("" if v is None else str(v) for v in items))
+            return Value(sep.join("" if v is None or v is _HOLE else str(v) for v in items))
         if name == "reverse":
             return Value(list(reversed(py)))
         if name == "concat":
