@@ -719,6 +719,8 @@ def _sequence_value(node, source: str) -> str | None:
         return piped
     if node.type != "array":
         return None
+    if _array_has_elision(node):
+        return None
     parts: list[str] = []
     for child in node.named_children:
         if child.type == "spread_element":
@@ -730,6 +732,22 @@ def _sequence_value(node, source: str) -> str | None:
     if not parts:
         return None
     return "|".join(parts)
+
+
+def _array_has_elision(node) -> bool:
+    """True when the array has a hole. A trailing comma alone is not one."""
+    last = "["
+    for child in node.children:
+        if child.type in {"[", "]", "comment"}:
+            continue
+        if not child.is_named and child.type == ",":
+            if last in {"[", ","}:
+                return True
+            last = ","
+            continue
+        if child.is_named:
+            last = "elem"
+    return False
 
 
 def _sequence_decl(stmt, source: str):

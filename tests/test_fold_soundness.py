@@ -36,6 +36,51 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_array_holes_keep_their_slots():
+    """Elisions are slots. Dropping them shifts later elements onto the hole."""
+    joined = deobfuscate(
+        'var m = (["a",,"b"].join(",") === "a,,b") ? "PAYLOAD" : "DECOY";',
+        language="js",
+    )
+    assert "PAYLOAD" in joined.text
+    assert "DECOY" not in joined.text
+
+    trailing = deobfuscate(
+        'var m = (["a", "b",].join(",") === "a,b") ? "PAYLOAD" : "DECOY";',
+        language="js",
+    )
+    assert "PAYLOAD" in trailing.text
+    assert "DECOY" not in trailing.text
+
+    tail = deobfuscate(
+        'var m = (["NO",, "YES"][2] === "YES") ? "SLOT" : "MISSED";',
+        language="js",
+    )
+    assert "SLOT" in tail.text
+    assert "MISSED" not in tail.text
+
+    hole = deobfuscate(
+        'var m = (["NO",, "YES"][1] === "YES") ? "SHIFTED" : "HOLE";',
+        language="js",
+    )
+    assert "HOLE" in hole.text
+
+    leading = deobfuscate(
+        'var m = ([, "x"][0] === "x") ? "SHIFTED0" : "LEAD";',
+        language="js",
+    )
+    assert "LEAD" in leading.text
+
+    stored = deobfuscate(
+        'var a = ["NO",, "YES"]; var m = a[1];',
+        language="js",
+    )
+    compact = stored.text.replace(" ", "")
+    assert 'm="YES"' not in compact
+    assert 'm="NO"' not in compact
+    assert "a[1]" in compact
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")
