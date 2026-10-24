@@ -10,6 +10,7 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_hexdec_number,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -103,6 +104,10 @@ def test_php_differential_property_folds():
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
+
+    for number in (0, 1, 10, 65, 0x41, -1, -15, 255, 4096, 10.0, -10.0):
+        assert php_hexdec_number(number) == php_eval_json(f"hexdec({number})")
+    assert php_hexdec_number(10.5) is None
 
     chars = [chr(n) for n in range(32, 127) if chr(n) not in "'\\"]
     for _ in range(16):

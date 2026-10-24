@@ -246,6 +246,28 @@ def test_php_rot13():
     assert "str_rot13" not in result.text
 
 
+def test_php_hexdec_number_is_read_as_hex_text():
+    """hexdec() stringifies first. hexdec(65) is 0x65, so the eval body is echo."""
+    src = """<?php eval(chr(hexdec(65))."cho 'LIVE';");"""
+    result = deobfuscate(src, language="php")
+    assert "echo 'LIVE';" in result.text
+    assert "hexdec" not in result.text
+    assert "Acho" not in result.text
+
+    widened = "<?php $x = chr(hexdec(0x41)); $y = hexdec(10); $z = hexdec(-15);"
+    result = deobfuscate(widened, language="php")
+    compact = "".join(result.text.split())
+    assert "$x='e';" in compact
+    assert "$y=16;" in compact
+    assert "$z=21;" in compact
+
+    # 10.5 is not an integer. Truncating it to 10 used to drop the real value.
+    fractional = "<?php $x = hexdec(10.5);"
+    result = deobfuscate(fractional, language="php")
+    assert "hexdec" in result.text
+    assert "$x=10;" not in "".join(result.text.split())
+
+
 def _rot13_gzinflate_blob(payload: str) -> str:
     """str_rot13(gzdeflate(str_rot13(payload))) as base64, matching the bh.php wrapper."""
     import codecs
