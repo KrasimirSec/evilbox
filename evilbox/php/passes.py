@@ -17,6 +17,7 @@ from evilbox.decode import (
     looks_like_php_source,
     parse_quoted_string,
     php_bitwise_not,
+    php_hexdec_number,
     php_quote,
     php_string_bytes,
     php_str_pad,
@@ -1504,9 +1505,11 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(data) if data is not None else None
 
     if name == "hexdec" and values:
-        s = as_str(values[0]) if not _is_num(values[0].py) else None
         if _is_num(values[0].py):
-            return Value(int(values[0].py))
+            # hexdec(65) casts to "65" and parses hex. It does not return 65.
+            parsed = php_hexdec_number(values[0].py)
+            return Value(parsed) if parsed is not None else None
+        s = as_str(values[0])
         if s is None:
             return None
         try:

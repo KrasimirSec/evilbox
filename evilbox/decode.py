@@ -743,3 +743,35 @@ def format_php_number(value: float | int) -> str:
         return str(value)
     except ValueError:
         raise ValueError("integer too large to fold") from None
+
+
+# PHP prints integer-valued floats in scientific notation from 1e14 up.
+_PHP_HEXDEC_FLOAT_DECIMAL_LIMIT = 10**14
+_PHP_INT_MAX = 2**63 - 1
+
+
+def php_hexdec_number(value: int | float) -> int | None:
+    """PHP ``hexdec()`` for a numeric argument.
+
+    The argument is cast to its decimal spelling, then that text is read as
+    hex. ``hexdec(65)`` is ``101``, and ``hexdec(-15)`` is ``21`` because the
+    sign is not a hex digit. Non-integer floats, and floats PHP would spell
+    with an exponent, are left unfolded.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            return None
+        if not value.is_integer() or abs(value) >= _PHP_HEXDEC_FLOAT_DECIMAL_LIMIT:
+            return None
+        value = int(value)
+    if not isinstance(value, int) or value.bit_length() > 63:
+        return None
+    digits = "".join(ch for ch in str(value) if ch in "0123456789abcdefABCDEF")
+    if not digits:
+        return 0
+    parsed = int(digits, 16)
+    if parsed > _PHP_INT_MAX:
+        return None
+    return parsed
