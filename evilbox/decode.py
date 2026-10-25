@@ -343,6 +343,54 @@ def unescape_js_string_body(body: str) -> str:
     return "".join(out)
 
 
+def unescape_php_embedded_escapes(text: str) -> str:
+    """Decode PHP hex and ``\\e`` escapes that tree-sitter left in string text.
+
+    Uppercase ``\\XHH`` is a hex byte in double quotes, the same as ``\\xHH``.
+    The PHP grammar only tags lowercase ``\\x``, so ``\\X48`` arrives as raw
+    text. ``\\e`` is ESC. Every other backslash pair (``\\b``, ``\\8``, ``\\q``)
+    is literal and must stay a backslash plus that character.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in "xX":
+                j = i + 2
+                digits = 0
+                while digits < 2 and j < n and text[j] in "0123456789abcdefABCDEF":
+                    digits += 1
+                    j += 1
+                if digits:
+                    out.append(chr(int(text[i + 2 : j], 16)))
+                    i = j
+                    continue
+            if nxt == "e":
+                out.append("\x1b")
+                i += 2
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def unescape_php_escape_sequence(body: str) -> str:
+    """Decode one PHP `escape_sequence` node, including its leading backslash."""
+    if body == r"\e":
+        return "\x1b"
+    if len(body) >= 3 and body[0] == "\\" and body[1] in "xX":
+        take = 0
+        for ch in body[2:]:
+            if take == 2 or ch not in "0123456789abcdefABCDEF":
+                break
+            take += 1
+        if take:
+            return chr(int(body[2 : 2 + take], 16)) + body[2 + take :]
+    return unescape_js_string_body(body)
+
+
 def parse_quoted_string(literal: str) -> str | None:
     if len(literal) < 2:
         return None
