@@ -303,6 +303,46 @@ def test_fixture_js_fromcharcode():
     assert "Hello world" in result.text
 
 
+def test_php_uppercase_hex_eval_is_the_payload():
+    """`\\XHH` is a hex byte. Folding it as literal text splices the wrong eval."""
+    src = r'''<?php eval("\X65\X63\X68\X6f\X20\X27\X4c\X49\X56\X45\X27\X3b");'''
+    result = deobfuscate(src, language="php")
+    assert "echo 'LIVE';" in result.text
+    assert "\\X65" not in result.text
+
+    branch = r'''<?php $a = "\X48\X45\X4C\X4C\X4F"; if ($a === "HELLO") { eval("LIVE"); } else { echo "DECOY"; }'''
+    result = deobfuscate(branch, language="php")
+    compact = "".join(result.text.split())
+    assert "$a='HELLO'" in compact
+    assert "$a==='HELLO'" in compact or "$a==\"HELLO\"" in compact
+    assert "DECOY" in result.text
+
+    escaped = r'''<?php $d = "\\X41"; $s = '\X48'; $w = "/\bsecret\b/";'''
+    result = deobfuscate(escaped, language="php")
+    # A doubled backslash stays a literal backslash, so \X41 is not the byte A.
+    assert "\\\\X41" in result.text
+    assert "\\\\X48" in result.text
+    assert "\\\\bsecret\\\\b" in result.text
+    assert "\\x08" not in result.text
+
+
+def test_php_esc_and_short_hex_keep_the_live_branch():
+    """`\\e` is ESC and `\\x4` is one byte. JavaScript rules turn both into text."""
+    src = r'''<?php $flag = "\e"; if ($flag === chr(27)) { eval("LIVE"); } else { echo "DECOY"; }'''
+    result = deobfuscate(src, language="php")
+    compact = "".join(result.text.split())
+    assert "$flag='e'" not in compact
+    assert "\\x1b" in result.text
+    assert compact.count("\\x1b") >= 2 or ('$flag="\\x1b"' in compact and '==="\\x1b"' in compact)
+
+    short = r'''<?php $b = "\x4"; if ($b === chr(4)) { eval("LIVE"); } else { echo "DECOY"; }'''
+    result = deobfuscate(short, language="php")
+    compact = "".join(result.text.split())
+    assert "$b='x4'" not in compact
+    assert "\\x04" in result.text
+    assert compact.count("\\x04") >= 2
+
+
 def test_fixture_php_eval_base64():
     src = (FIXTURES / "eval_base64.php").read_text(encoding="utf-8")
     result = deobfuscate(src, language="auto", path=str(FIXTURES / "eval_base64.php"))

@@ -16,6 +16,8 @@ from evilbox.decode import (
     php_substr,
     raw_inflate,
     stripslashes,
+    unescape_php_embedded_escapes,
+    unescape_php_escape_sequence,
     uudecode_ex,
     xor_strings,
 )
@@ -109,3 +111,21 @@ def test_php_differential_property_folds():
         raw = "".join(rng.choice(chars) for _ in range(rng.randint(1, 12)))
         php_val = php_eval_json("~" + _php_quote(raw))
         assert php_val == php_bitwise_not(raw)
+
+
+def test_php_double_quote_hex_and_esc():
+    """Uppercase hex and ESC are PHP bytes, not JavaScript text."""
+    assert unescape_php_embedded_escapes(r"\X48\X45\X4C\X4C\X4F") == "HELLO"
+    assert unescape_php_embedded_escapes(r"pre\X41post") == "preApost"
+    assert unescape_php_embedded_escapes(r"\X4G") == "\x04G"
+    assert unescape_php_embedded_escapes(r"\X") == r"\X"
+    assert unescape_php_embedded_escapes(r"\b") == r"\b"
+    assert unescape_php_embedded_escapes(r"\8") == r"\8"
+    assert unescape_php_embedded_escapes(r"\q") == r"\q"
+    assert unescape_php_embedded_escapes(r"\e") == "\x1b"
+    assert unescape_php_escape_sequence(r"\e") == "\x1b"
+    assert unescape_php_escape_sequence(r"\x4") == "\x04"
+    assert unescape_php_escape_sequence(r"\x4G") == "\x04G"
+    assert unescape_php_escape_sequence(r"\x41") == "A"
+    assert unescape_php_escape_sequence(r"\n") == "\n"
+    assert unescape_php_escape_sequence(r"\\") == "\\"
