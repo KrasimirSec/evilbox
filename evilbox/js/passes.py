@@ -1224,6 +1224,92 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
     return None
 
 
+_JS_SCI_RE = re.compile(r"^(\d+)(?:\.(\d+))?e([+-]?\d+)$")
+
+
+def _js_format_digits(digits: str, n: int) -> str:
+    """ECMAScript Number::toString decimal layout for a positive significand."""
+    k = len(digits)
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return "0." + ("0" * (-n)) + digits
+    exp = n - 1
+    mant = digits if k == 1 else digits[0] + "." + digits[1:]
+    sign = "+" if exp >= 0 else "-"
+    return f"{mant}e{sign}{abs(exp)}"
+
+
+def _js_positive_number_string(value: float) -> str:
+    """Shortest round-trip digits, printed with JavaScript's exponent cutoff."""
+    text = repr(value)
+    match = _JS_SCI_RE.match(text)
+    if match:
+        whole, frac, exp_s = match.group(1), match.group(2) or "", int(match.group(3))
+        digits = whole + frac.rstrip("0")
+        return _js_format_digits(digits, int(exp_s) + len(whole))
+    if text.endswith(".0") and text[:-2].isdigit():
+        digits = text[:-2].lstrip("0") or "0"
+        return _js_format_digits(digits, len(digits))
+    if "." in text:
+        whole, frac = text.split(".", 1)
+        if whole in {"", "0"}:
+            zeros = len(frac) - len(frac.lstrip("0"))
+            digits = frac.lstrip("0") or "0"
+            return _js_format_digits(digits, -zeros)
+        digits = whole.lstrip("0") + frac
+        return _js_format_digits(digits, len(whole.lstrip("0")))
+    digits = text.lstrip("0") or "0"
+    return _js_format_digits(digits, len(digits))
+
+
+def _js_number_to_string(value: int | float) -> str:
+    """JavaScript Number ToString, not Python's float formatting."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value == 0.0:
+            return "0"
+        sign = "-" if value < 0 else ""
+        return sign + _js_positive_number_string(abs(value))
+    if value < 0:
+        return "-" + _js_number_to_string(-value)
+    if value < 10**21:
+        return str(value)
+    return _js_positive_number_string(float(value))
+
+
+def _js_to_string(value: Any) -> str | None:
+    """JavaScript ToString for concat arguments and join separators."""
+    if isinstance(value, Value):
+        return _js_to_string(value.py)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            py = item.py if isinstance(item, Value) else item
+            if py is None:
+                parts.append("")
+                continue
+            rendered = _js_to_string(py)
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        return ",".join(parts)
+    if _is_num(value):
+        return _js_number_to_string(value)
+    return None
+
+
 def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
     name = prop
     py = recv.py
@@ -1237,15 +1323,13 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
                 return Value(ord(py[i]))
             return None
         if name == "concat":
-            out = py
+            parts = [py]
             for val in values:
-                if isinstance(val.py, (str, int, float)) and not isinstance(val.py, bool):
-                    out += str(val.py)
-                elif isinstance(val.py, str):
-                    out += val.py
-                else:
+                rendered = _js_to_string(val.py)
+                if rendered is None:
                     return None
-            return Value(out)
+                parts.append(rendered)
+            return Value("".join(parts))
         if name in {"slice", "substring", "substr"}:
             if not values or not _is_num(values[0].py):
                 return None
@@ -1285,7 +1369,12 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
     if isinstance(py, list):
         items = [x.py if isinstance(x, Value) else x for x in py]
         if name == "join":
-            sep = values[0].py if values and isinstance(values[0].py, str) else ","
+            if not values:
+                sep = ","
+            else:
+                sep = _js_to_string(values[0].py)
+                if sep is None:
+                    return None
             return Value(sep.join("" if v is None else str(v) for v in items))
         if name == "reverse":
             return Value(list(reversed(py)))
