@@ -36,6 +36,25 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_concat_and_join_separator_use_tostring():
+    src = """
+if ("ab".concat(1.0) === "ab1") { keepNum(); } else { dropNum(); }
+if ("ab".concat(1e-7) === "ab1e-7") { keepExp(); } else { dropExp(); }
+if ("ab".concat(null) === "abnull") { keepNull(); } else { dropNull(); }
+if ("ab".concat(true, false) === "abtruefalse") { keepBool(); } else { dropBool(); }
+if (["https://evil.test", "a"].join(null) === "https://evil.testnulla") { keepSep(); } else { dropSep(); }
+if (["a", "b"].join(1) === "a1b") { keepOne(); } else { dropOne(); }
+if (["a", "b"].join(true) === "atrueb") { keepTrue(); } else { dropTrue(); }
+if (["a", "b"].join(1e-7) === "a1e-7b") { keepTiny(); } else { dropTiny(); }
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    for name in ("keepNum", "keepExp", "keepNull", "keepBool", "keepSep", "keepOne", "keepTrue", "keepTiny"):
+        assert f"{name}();" in result.text
+    for name in ("dropNum", "dropExp", "dropNull", "dropBool", "dropSep", "dropOne", "dropTrue", "dropTiny"):
+        assert name not in result.text
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")
