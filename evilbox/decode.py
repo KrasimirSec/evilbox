@@ -549,14 +549,32 @@ def _percent_decode(text: str) -> str:
 
 
 def js_quote(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    return f'"{escaped}"'
+    """JS string literal.
+
+    Code points above U+00FF are written as ``\\u`` escapes. The source buffer
+    is often Latin-1, and a raw character that does not fit would be stored as
+    ``?``, making unequal strings compare equal.
+    """
+    out: list[str] = []
+    for ch in value:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif code > 0xFFFF:
+            out.append(f"\\u{{{code:x}}}")
+        elif code > 0xFF:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def php_quote(value: str) -> str:
@@ -564,9 +582,11 @@ def php_quote(value: str) -> str:
 
     Single quotes cannot spell NUL or other controls without embedding the raw
     byte, and tree-sitter rejects a raw NUL inside quotes. Those values use
-    double quotes and `\\xHH`, so a later fold still parses.
+    double quotes and `\\xHH`, so a later fold still parses. Code points above
+    U+00FF use ``\\u{...}`` for the same reason: a raw character would not fit
+    the Latin-1 source buffer.
     """
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    if any(ord(ch) < 32 or ord(ch) == 127 or ord(ch) > 255 for ch in value):
         return _php_double_quote(value)
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
