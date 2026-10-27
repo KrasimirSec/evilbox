@@ -309,3 +309,34 @@ def test_fixture_php_eval_base64():
     assert result.language == "php"
     assert "echo" in result.text
     assert "hi" in result.text
+
+
+def test_js_unicode_above_latin1_is_not_replaced_with_question_mark():
+    different = r'if ("\u0100" === "\u0101") { live(); } else { decoy(); }'
+    result = deobfuscate(different, language="js")
+    assert "decoy" in result.text
+    assert "live" not in result.text
+    assert "?" not in result.text
+
+    against_q = r'if ("\u0100" === "?") { live(); } else { decoy(); }'
+    result = deobfuscate(against_q, language="js")
+    assert "decoy" in result.text
+    assert "live" not in result.text
+
+    folded = deobfuscate("var x = String.fromCharCode(256);", language="js")
+    assert r"\u0100" in folded.text
+    assert "?" not in folded.text
+
+    same = r'if ("\u0100" === "\u0100") { live(); } else { decoy(); }'
+    result = deobfuscate(same, language="js")
+    assert "live" in result.text
+    assert "decoy" not in result.text
+
+
+def test_php_unicode_above_latin1_is_not_replaced_with_question_mark():
+    src = r'<?php $x = "\u{0100}"; $y = "\u{0101}";'
+    result = deobfuscate(src, language="php")
+    assert '"?"' not in result.text
+    assert "'?'" not in result.text
+    assert "100" in result.text.lower()
+    assert "101" in result.text.lower()

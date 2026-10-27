@@ -123,7 +123,10 @@ def apply_replacements(source: str, replacements: list[tuple[int, int, str]]) ->
         try:
             piece = text.encode(encoding)
         except UnicodeEncodeError:
-            piece = text.encode(encoding, errors="replace")
+            # A '?' substitute makes unequal strings identical and the next
+            # pass treats that as a real comparison result. Keep the original
+            # span instead of inventing a character.
+            continue
         out = out[:start] + piece + out[end:]
     try:
         return out.decode(encoding)
