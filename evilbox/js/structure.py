@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from evilbox.decode import js_utf16
 from evilbox.parsers import parse_js
 from evilbox.rewrite import apply_replacements, has_error, node_text, stmt_span, walk
 
@@ -656,7 +657,9 @@ def _string_compare_truth(node, source: str):
         or not isinstance(right.py, str)
     ):
         return None
-    truth = left.py == right.py if op in {"===", "=="} else left.py != right.py
+    left_text = js_utf16(left.py)
+    right_text = js_utf16(right.py)
+    truth = left_text == right_text if op in {"===", "=="} else left_text != right_text
     return (not truth) if neg else truth
 
 

@@ -60,6 +60,26 @@ def hex_payload_to_text(text: str, *, min_bytes: int = 2) -> str | None:
     return decoded
 
 
+def js_utf16(text: str) -> str:
+    """JavaScript strings are UTF-16 code units, not Unicode scalar values.
+
+    U+1F600 is one Python character and two units (U+D83D, U+DE00). BMP
+    characters and existing surrogate code units are left as they are.
+    """
+    if not any(ord(ch) > 0xFFFF for ch in text):
+        return text
+    out: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if code <= 0xFFFF:
+            out.append(ch)
+            continue
+        code -= 0x10000
+        out.append(chr(0xD800 + (code >> 10)))
+        out.append(chr(0xDC00 + (code & 0x3FF)))
+    return "".join(out)
+
+
 def parse_js_quoted_string(literal: str) -> str | None:
     """JS single and double quotes both honour \\x / \\u / octal escapes."""
     if len(literal) < 2:
@@ -67,7 +87,7 @@ def parse_js_quoted_string(literal: str) -> str | None:
     quote = literal[0]
     if quote not in "'\"" or literal[-1] != quote:
         return None
-    return unescape_js_string_body(literal[1:-1])
+    return js_utf16(unescape_js_string_body(literal[1:-1]))
 
 
 def js_unescape(text: str) -> str:

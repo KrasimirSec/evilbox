@@ -23,6 +23,34 @@ var x = ("a" == "a") ? "yes" : "no";
     assert "Removed dead string-comparison branch" in result.warnings
 
 
+def test_js_non_bmp_string_is_utf16_code_units():
+    """U+1F600 is one Python character and two UTF-16 units.
+
+    Folding it as a scalar makes charCodeAt, length, and indexOf disagree
+    with JavaScript, so a constant comparison deletes the live branch.
+    """
+    cases = [
+        r'if (("\u{1F600}".charCodeAt(0) + "") === "55357") { live(); } else { decoy(); }',
+        r'if (("\u{1F600}".charCodeAt(1) + "") === "56832") { live(); } else { decoy(); }',
+        r'if (("\u{1F600}"["length"] + "") === "2") { live(); } else { decoy(); }',
+        r'if (("\u{1F600}Z".indexOf("Z") + "") === "2") { live(); } else { decoy(); }',
+        r'if ((`\u{1F600}`.charCodeAt(0) + "") === "55357") { live(); } else { decoy(); }',
+        'if (("😀".charCodeAt(0) + "") === "55357") { live(); } else { decoy(); }',
+        r'if ("\u{1F600}" === "\uD83D\uDE00") { live(); } else { decoy(); }',
+        r'if (String.fromCharCode(0xD83D, 0xDE00) === "\u{1F600}") { live(); } else { decoy(); }',
+        r'if (("\u00e9".charCodeAt(0) + "") === "233") { live(); } else { decoy(); }',
+    ]
+    for src in cases:
+        result = deobfuscate(src, language="js")
+        assert "live" in result.text, result.text
+        assert "decoy" not in result.text, result.text
+
+    scalar = r'if (("\u{1F600}".charCodeAt(0) + "") === "128512") { live(); } else { decoy(); }'
+    result = deobfuscate(scalar, language="js")
+    assert "decoy" in result.text
+    assert "live" not in result.text
+
+
 def test_js_real_comparison_is_kept():
     src = 'if (user === "a") { keep(); } else { also(); }'
     result = deobfuscate(src, language="js")

@@ -12,6 +12,7 @@ from evilbox.decode import (
     hex_payload_to_text,
     js_quote,
     js_unescape,
+    js_utf16,
     parse_js_quoted_string,
     percent_decode,
     pick_repeating_xor_text,
@@ -704,7 +705,7 @@ def _eval_template(node, source: str, env: FoldEnv | None) -> Value | None:
             parts.append(unescape_js_string_body(raw))
         elif raw not in {"`", "${", "}"}:
             parts.append(unescape_js_string_body(raw))
-    return Value("".join(parts))
+    return Value(js_utf16("".join(parts)))
 
 
 def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
