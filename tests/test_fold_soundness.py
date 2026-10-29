@@ -12,6 +12,95 @@ from evilbox.pipeline import deobfuscate
 from evilbox.signature import STRING_LIT_RE, extract_surface
 
 
+def test_js_array_element_write_does_not_discard_the_pass():
+    src = """
+var a = ["http://decoy.example/"];
+a[0] = "http://evil.example/";
+var x = String.fromCharCode(72, 105);
+"""
+    result = deobfuscate(src, language="js")
+    assert 'a[0] = "http://evil.example/"' in result.text
+    assert '"http://decoy.example/" =' not in result.text
+    assert "Hi" in result.text
+    assert "fromCharCode" not in result.text
+
+
+def test_js_shift_does_not_fold_the_previous_element():
+    src = """
+var a = ["http://decoy.example/", "http://evil.example/"];
+a.shift();
+var u = a[0];
+"""
+    result = deobfuscate(src, language="js")
+    assert "a.shift()" in result.text
+    assert 'var u = "http://decoy.example/"' not in result.text
+    assert "a[0]" in result.text
+
+
+def test_js_string_index_assignment_is_not_rewritten():
+    src = """
+var s = "abc";
+s[0] = "Z";
+var u = s[1];
+var x = String.fromCharCode(72);
+"""
+    result = deobfuscate(src, language="js")
+    assert 's[0] = "Z"' in result.text
+    assert '"b"' in result.text
+    assert '"H"' in result.text
+
+
+def test_php_array_shift_does_not_echo_the_removed_element():
+    src = """<?php
+$a = array("http://decoy.example/", "http://evil.example/");
+array_shift($a);
+echo $a[0];
+"""
+    result = deobfuscate(src, language="php")
+    assert "array_shift" in result.text
+    assert "http://decoy.example/" not in result.text.split("array_shift", 1)[1]
+    assert "$a[0]" in result.text
+
+
+def test_php_element_write_keeps_later_reads_and_other_folds():
+    src = """<?php
+$a = array("http://decoy.example/");
+$a[0] = "http://evil.example/";
+echo $a[0];
+$x = chr(72).chr(105);
+"""
+    result = deobfuscate(src, language="php")
+    assert "$a[0] =" in result.text
+    assert "echo $a[0]" in result.text
+    assert "Hi" in result.text
+    assert "chr(" not in result.text
+    assert "'http://decoy.example/' =" not in result.text
+
+
+def test_php_element_read_before_write_still_folds():
+    src = """<?php
+$a = array("keep", "drop");
+echo $a[0];
+$a[0] = "changed";
+"""
+    result = deobfuscate(src, language="php")
+    assert "echo 'keep'" in result.text
+    assert "$a[0] = " in result.text
+
+
+def test_php_string_element_write_is_not_the_old_byte():
+    src = """<?php
+$s = "ab";
+$s[0] = "Z";
+echo $s[0];
+$x = chr(72).chr(105);
+"""
+    result = deobfuscate(src, language="php")
+    assert '$s[0] = "Z"' in result.text or "$s[0] = 'Z'" in result.text
+    assert "echo 'a'" not in result.text
+    assert "Hi" in result.text
+
+
 def test_php_reassignment_is_not_folded():
     src = "<?php $a='base64_decode'; echo $a('aGVsbG8='); $a='strrev';"
     result = deobfuscate(src, language="php")

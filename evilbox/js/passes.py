@@ -134,6 +134,9 @@ class FoldEnv:
     decoders: dict[str, DecoderInfo] = field(default_factory=dict)
     concat_rhs: dict[ScopeKey, object] = field(default_factory=dict)
     concat_extra: dict[ScopeKey, list] = field(default_factory=dict)
+    # Array bindings that are written or passed to a mutating method.
+    # Indexes of these bindings are not constants.
+    unstable: set[ScopeKey] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
     def key(self, node, name: str) -> ScopeKey:
@@ -218,8 +221,135 @@ def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
     return out
 
 
+# Methods that mutate the receiver. `join` / `slice` / `concat` do not.
+_JS_ARRAY_MUTATORS = frozenset(
+    {
+        "copyWithin",
+        "fill",
+        "pop",
+        "push",
+        "reverse",
+        "shift",
+        "sort",
+        "splice",
+        "unshift",
+    }
+)
+
+
+def _same_span(left, right) -> bool:
+    # tree-sitter returns a fresh wrapper for each lookup, so `is` does not work.
+    return (
+        left is not None
+        and right is not None
+        and left.start_byte == right.start_byte
+        and left.end_byte == right.end_byte
+        and left.type == right.type
+    )
+
+
+def _js_lvalue_subscript(node) -> bool:
+    """True when this subscript is being written, not read."""
+    parent = node.parent
+    if parent is None:
+        return False
+    if parent.type in {"assignment_expression", "augmented_assignment_expression"}:
+        return _same_span(parent.child_by_field_name("left"), node)
+    if parent.type == "update_expression":
+        return True
+    if parent.type == "unary_expression":
+        return any(child.type == "delete" for child in parent.children)
+    return False
+
+
+def _js_member_name(member, source: str) -> tuple[object | None, str | None]:
+    obj = member.child_by_field_name("object")
+    prop = member.child_by_field_name("property")
+    if obj is None or prop is None or obj.type != "identifier":
+        return None, None
+    return obj, node_text(source, prop)
+
+
+def _unstable_array_keys(tree, source: str) -> set[ScopeKey]:
+    """Bindings whose array value changes after the initializer.
+
+    A direct `a[i] = ...`, `a.shift()`, or `a.length = n` makes later `a[i]`
+    reads a different element. Folding them from the initializer keeps the
+    previous slot, and folding the write target turns `a[0] = "x"` into the
+    unparseable `"old" = "x"`, which throws away the rest of the pass.
+    """
+    array_keys: set[ScopeKey] = set()
+    for node in walk(tree.root_node):
+        if node.type != "variable_declarator":
+            continue
+        name_node = node.child_by_field_name("name")
+        value = node.child_by_field_name("value")
+        if name_node is None or value is None or name_node.type != "identifier":
+            continue
+        if value.type == "array":
+            array_keys.add((enclosing_function_id(name_node), node_text(source, name_node)))
+
+    unstable: set[ScopeKey] = set()
+
+    def taint_ident(ident) -> None:
+        unstable.add((enclosing_function_id(ident), node_text(source, ident)))
+
+    def taint_array_ident(ident) -> None:
+        key = (enclosing_function_id(ident), node_text(source, ident))
+        if key in array_keys:
+            unstable.add(key)
+
+    for node in walk(tree.root_node):
+        if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+            left = node.child_by_field_name("left")
+            if left is None:
+                continue
+            if left.type == "subscript_expression":
+                obj = left.child_by_field_name("object")
+                if obj is not None and obj.type == "identifier":
+                    taint_array_ident(obj)
+            elif left.type == "member_expression":
+                obj, prop = _js_member_name(left, source)
+                if obj is not None and prop == "length":
+                    taint_array_ident(obj)
+            continue
+        if node.type == "update_expression":
+            target = next((child for child in node.named_children if child.type == "subscript_expression"), None)
+            if target is not None:
+                obj = target.child_by_field_name("object")
+                if obj is not None and obj.type == "identifier":
+                    taint_array_ident(obj)
+            continue
+        if node.type == "unary_expression" and any(child.type == "delete" for child in node.children):
+            target = next((child for child in node.named_children if child.type == "subscript_expression"), None)
+            if target is not None:
+                obj = target.child_by_field_name("object")
+                if obj is not None and obj.type == "identifier":
+                    taint_array_ident(obj)
+            continue
+        if node.type != "call_expression":
+            continue
+        fn = node.child_by_field_name("function")
+        if fn is None:
+            continue
+        if fn.type == "member_expression":
+            obj, prop = _js_member_name(fn, source)
+            if obj is not None and prop in _JS_ARRAY_MUTATORS:
+                taint_ident(obj)
+        elif fn.type == "subscript_expression":
+            obj = fn.child_by_field_name("object")
+            index = fn.child_by_field_name("index")
+            if obj is None or index is None or obj.type != "identifier" or index.type != "string":
+                continue
+            prop = parse_js_quoted_string(node_text(source, index))
+            if prop in _JS_ARRAY_MUTATORS:
+                taint_ident(obj)
+    return unstable
+
+
 def collect_env(tree, source: str) -> FoldEnv:
     env = FoldEnv()
+    env.unstable = _unstable_array_keys(tree, source)
     assign_count: dict[ScopeKey, int] = {}
     for node in walk(tree.root_node):
         if node.type == "variable_declarator":
@@ -257,7 +387,7 @@ def collect_env(tree, source: str) -> FoldEnv:
                     ok = False
                     break
                 elems.append(item)
-            if ok:
+            if ok and key not in env.unstable:
                 env.arrays[key] = elems
             continue
         if value.type == "identifier" and node_text(source, value) in KNOWN_GLOBALS:
@@ -265,6 +395,8 @@ def collect_env(tree, source: str) -> FoldEnv:
             continue
         item = const_eval(value, source, env)
         if item is not None and not item.splice_raw:
+            if key in env.unstable and isinstance(item.py, list):
+                continue
             env.scalars[key] = item
             if isinstance(item.py, list):
                 env.arrays[key] = item.py
@@ -708,6 +840,10 @@ def _eval_template(node, source: str, env: FoldEnv | None) -> Value | None:
 
 
 def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
+    # `a[0] = "x"` is a write. Replacing the target with the old element
+    # produces `"old" = "x"` and the pipeline drops the whole pass.
+    if _js_lvalue_subscript(node):
+        return None
     obj = node.child_by_field_name("object")
     index = node.child_by_field_name("index")
     if obj is None or index is None:
@@ -733,9 +869,11 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
             elems.append(item)
     elif obj.type == "identifier" and env is not None:
         name = node_text(source, obj)
-        elems = env.arrays.get(env.key(obj, name))
-        if elems is None:
-            elems = env.array_by_name(name)
+        key = env.key(obj, name)
+        if key not in env.unstable:
+            elems = env.arrays.get(key)
+            if elems is None:
+                elems = env.array_by_name(name)
     if elems is not None:
         if idx < 0 or idx >= len(elems):
             return None

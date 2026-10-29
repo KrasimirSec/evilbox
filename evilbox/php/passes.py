@@ -127,7 +127,10 @@ class FoldEnv:
         prior = [item for item in self.history.get(key, []) if item[0] < pos]
         if not prior:
             return None
-        last = prior[-1]
+        # Most recent write before this read. History is not always appended
+        # in source order: a later element write is recorded before the
+        # initializer walk so `.=` can see it.
+        last = max(prior, key=lambda item: item[0])
         if last[2] or last[1] is None:
             return None
         if self._track_reads and key not in self._read_keys:
@@ -510,6 +513,7 @@ def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
 def collect_env(tree, source: str) -> FoldEnv:
     env = FoldEnv()
     tainted = _tainted_php_names(tree, source)
+    _note_php_container_mutations(tree, source, env)
     nodes = [
         node
         for node in walk(tree.root_node)
@@ -586,7 +590,115 @@ def collect_env(tree, source: str) -> FoldEnv:
         else:
             env.record(node, name, None, True)
             env.drop(left, name)
+    for key, items in env.history.items():
+        if any(unsound or value is None for _end, value, unsound in items):
+            env.arrays.pop(key, None)
+            env.keyed_arrays.pop(key, None)
     return env
+
+
+# Functions whose first parameter is an array passed by reference.
+# array_multisort takes several by-ref arrays mixed with sort flags.
+_PHP_REF_ARRAY_FUNCS = frozenset(
+    {
+        "array_pop",
+        "array_push",
+        "array_shift",
+        "array_splice",
+        "array_unshift",
+        "array_walk",
+        "array_walk_recursive",
+        "arsort",
+        "asort",
+        "krsort",
+        "ksort",
+        "natcasesort",
+        "natsort",
+        "rsort",
+        "shuffle",
+        "sort",
+        "uasort",
+        "uksort",
+        "usort",
+    }
+)
+
+
+def _php_subscript_var(node, source: str) -> str | None:
+    named = node.named_children
+    if not named or named[0].type != "variable_name":
+        return None
+    return node_text(source, named[0]).lstrip("$")
+
+
+def _php_write_subscript(node) -> bool:
+    parent = node.parent
+    if parent is None:
+        return False
+    if parent.type in {"assignment_expression", "augmented_assignment_expression"}:
+        left = parent.child_by_field_name("left")
+        return (
+            left is not None
+            and left.type == node.type
+            and left.start_byte == node.start_byte
+            and left.end_byte == node.end_byte
+        )
+    if parent.type in {"update_expression", "unset_statement"}:
+        return True
+    return False
+
+
+def _note_php_container_mutations(tree, source: str, env: FoldEnv) -> None:
+    """A write through `$a[...]` or a by-ref array function changes later reads.
+
+    Recording the binding unsound from that statement keeps an earlier
+    `$a[0]` fold, and refuses the write target itself so it is not replaced
+    with the previous element.
+    """
+
+    def mark(node, name: str) -> None:
+        env.record(node, name, None, True)
+
+    for node in walk(tree.root_node):
+        if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "subscript_expression":
+                name = _php_subscript_var(left, source)
+                if name:
+                    mark(node, name)
+            continue
+        if node.type == "update_expression":
+            target = next((child for child in node.named_children if child.type == "subscript_expression"), None)
+            if target is not None:
+                name = _php_subscript_var(target, source)
+                if name:
+                    mark(node, name)
+            continue
+        if node.type == "unset_statement":
+            for child in node.named_children:
+                if child.type == "variable_name":
+                    mark(node, node_text(source, child).lstrip("$"))
+                elif child.type == "subscript_expression":
+                    name = _php_subscript_var(child, source)
+                    if name:
+                        mark(node, name)
+            continue
+        if node.type != "function_call_expression":
+            continue
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "name":
+            continue
+        callee = node_text(source, fn).lstrip("\\").lower()
+        if callee not in _PHP_REF_ARRAY_FUNCS and callee != "array_multisort":
+            continue
+        args = _call_args(node)
+        if callee == "array_multisort":
+            chosen = args
+        else:
+            chosen = args[:1]
+        for arg in chosen:
+            if arg.type == "variable_name":
+                mark(node, node_text(source, arg).lstrip("$"))
 
 
 def _php_var_name(node, source: str) -> str | None:
@@ -1917,6 +2029,9 @@ def _eval_include(node, source: str, env: FoldEnv | None) -> Value | None:
 
 
 def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
+    # `$a[0] = "x"` writes. Folding the target yields `'old' = "x"`.
+    if _php_write_subscript(node):
+        return None
     named = node.named_children
     if len(named) < 2:
         return None
