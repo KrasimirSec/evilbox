@@ -36,6 +36,37 @@ def test_php_loop_concat_is_not_collapsed():
     assert "echo 'ab'" not in result.text
 
 
+def test_js_string_of_array_keeps_the_joined_text():
+    src = """
+if (String(["http://evil.example"]) === "http://evil.example") { live(); } else { decoy(); }
+if (String(["aa", "bb"]) === "aa,bb") { keep(); } else { drop(); }
+if (String([true, false, null]) === "true,false,") { keepBool(); } else { dropBool(); }
+if (String([["a", "b"], "c"]) === "a,b,c") { keepNest(); } else { dropNest(); }
+if (String([1,,3]) === "1,,3") { liveHole(); } else { decoyHole(); }
+if (String((["x", "y"])) === "x,y") { keepParen(); } else { dropParen(); }
+if (String([]) === "") { keepEmpty(); } else { dropEmpty(); }
+var unknown = String([notFolded]);
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "live();" in result.text
+    assert "decoy" not in result.text
+    assert "keep();" in result.text
+    assert "drop" not in result.text
+    assert "keepBool();" in result.text
+    assert "dropBool" not in result.text
+    assert "keepNest();" in result.text
+    assert "dropNest" not in result.text
+    assert "liveHole();" in result.text
+    assert "decoyHole" not in result.text
+    assert "keepParen();" in result.text
+    assert "dropParen" not in result.text
+    assert "keepEmpty();" in result.text
+    assert "dropEmpty" not in result.text
+    assert "Value(" not in result.text
+    assert "String([notFolded])" in result.text.replace(" ", "")
+
+
 def test_js_loop_concat_is_not_collapsed():
     src = "var s = ''; for (var i = 0; i < 0; i++) { s += 'ab'; } console.log(s);"
     result = deobfuscate(src, language="js")

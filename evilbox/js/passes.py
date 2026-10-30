@@ -962,6 +962,93 @@ def _callee(node, source: str, env: FoldEnv | None) -> tuple[str | None, str | N
     return None, None, None
 
 
+# Whole numbers at or above 1e21 use scientific notation. Leave those, and
+# non-integers, unfolded rather than invent a digit string.
+_JS_ARRAY_PLAIN_LIMIT = 10**21
+
+
+def _js_join_piece(value: Any) -> str | None:
+    """One slot of `Array.prototype.toString` / `String(array)`.
+
+    `null` and `undefined` are empty. Nested arrays are joined with commas.
+    """
+    if isinstance(value, Value):
+        if value.splice_raw:
+            return None
+        value = value.py
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            piece = _js_join_piece(item)
+            if piece is None:
+                return None
+            parts.append(piece)
+        return ",".join(parts)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value.is_integer() and abs(value) < _JS_ARRAY_PLAIN_LIMIT:
+            return str(int(value))
+        return None
+    if isinstance(value, int) and abs(value) < _JS_ARRAY_PLAIN_LIMIT:
+        return str(value)
+    return None
+
+
+def _js_array_literal_to_string(node, source: str, env: FoldEnv | None) -> str | None:
+    """`String([1,,2])` is `"1,,2"`. Holes are empty slots; a trailing comma is not."""
+    inner = [child for child in node.children if child.type not in {"[", "]"}]
+    parts: list[str] = []
+    commas = 0
+    started = False
+
+    def flush_commas() -> bool:
+        nonlocal commas, started
+        if commas <= 0:
+            return True
+        # A comma after a slot is the separator. Extra commas, and commas
+        # before the first slot, are holes.
+        holes = commas if not started else commas - 1
+        if holes < 0:
+            return False
+        if holes:
+            parts.extend("" for _ in range(holes))
+            started = True
+        commas = 0
+        return True
+
+    for child in inner:
+        if not child.is_named and child.type == ",":
+            commas += 1
+            continue
+        if child.type == "spread_element":
+            return None
+        if not flush_commas():
+            return None
+        if child.type == "array":
+            rendered = _js_array_literal_to_string(child, source, env)
+        else:
+            val = const_eval(child, source, env)
+            if val is None or val.splice_raw:
+                return None
+            rendered = _js_join_piece(val.py)
+        if rendered is None:
+            return None
+        parts.append(rendered)
+        started = True
+    if not flush_commas():
+        return None
+    return ",".join(parts)
+
+
 def _from_char_code(values: list[Value]) -> Value | None:
     chars: list[str] = []
     for val in values:
@@ -1188,8 +1275,19 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             except ValueError:
                 return None
         return None
+    if obj == "String" and prop is None and args:
+        target = args[0]
+        while target is not None and target.type == "parenthesized_expression" and target.named_children:
+            target = target.named_children[0]
+        if target is not None and target.type == "array":
+            # The evaluated list has already dropped holes, so read the literal.
+            rendered = _js_array_literal_to_string(target, source, env)
+            return Value(rendered) if rendered is not None else None
     if obj == "String" and prop is None and values:
         py = values[0].py
+        if isinstance(py, list):
+            rendered = _js_join_piece(py)
+            return Value(rendered) if rendered is not None else None
         if isinstance(py, bool):
             return Value("true" if py else "false")
         if py is None:
