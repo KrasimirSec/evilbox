@@ -16,6 +16,21 @@ def test_js_fromcharcode_and_concat():
     assert "fromCharCode" not in result.text
 
 
+def test_js_legacy_octal_fromcharcode_keeps_the_live_branch():
+    """0110 is octal 72 ("H"). Reading it as decimal 110 keeps the decoy."""
+    src = (
+        'var msg = (String.fromCharCode(0110, 0145, 0154, 0154, 0157) === "Hello")'
+        ' ? "LIVE_PAYLOAD" : "DECOY";'
+    )
+    result = deobfuscate(src, language="js")
+    assert "LIVE_PAYLOAD" in result.text
+    assert "DECOY" not in result.text
+    # 08 is decimal 8 (backspace). It is not a legacy octal literal.
+    decimalish = deobfuscate("var n = String.fromCharCode(08);", language="js")
+    assert "\x08" in decimalish.text
+    assert "fromCharCode" not in decimalish.text
+
+
 def test_js_eval_atob():
     inner = "console.log('hi');"
     b64 = base64.b64encode(inner.encode()).decode()

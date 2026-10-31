@@ -754,15 +754,26 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
 
 
 def _parse_js_number(text: str) -> Value | None:
-    text = text.replace("_", "").strip()
+    raw = text.strip()
+    text = raw.replace("_", "")
     try:
-        if text.lower().startswith("0x"):
+        lower = text.lower()
+        if lower.startswith("0x"):
             return Value(int(text, 16))
-        if text.lower().startswith("0b"):
+        if lower.startswith("0b"):
             return Value(int(text, 2))
-        if text.lower().startswith("0o"):
+        if lower.startswith("0o"):
             return Value(int(text, 8))
-        if "." in text or "e" in text.lower():
+        # Non-strict legacy octal: 0101 is 65, not decimal 101. Decimal folds
+        # fromCharCode to the wrong character and dead-branch removal keeps the decoy.
+        if (
+            "_" not in raw
+            and len(raw) > 1
+            and raw[0] == "0"
+            and all(ch in "01234567" for ch in raw)
+        ):
+            return Value(int(raw, 8))
+        if "." in text or "e" in lower:
             return Value(float(text))
         return Value(int(text, 10))
     except ValueError:
