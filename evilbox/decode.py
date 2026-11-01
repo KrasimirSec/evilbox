@@ -47,6 +47,56 @@ def hex_decode(text: str) -> bytes | None:
         return None
 
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_PACK_H_RE = re.compile(r"H(\*|\d+)?")
+_NIBBLE = {ch: i for i, ch in enumerate("0123456789abcdef")}
+_NIBBLE.update({ch.upper(): i for i, ch in enumerate("0123456789abcdef")})
+
+
+def php_hex2bin(text: str) -> bytes | None:
+    """PHP `hex2bin`.
+
+    The string must be an even number of hex digits. Whitespace, `0x`, and
+    other separators are invalid and the call returns false. None here means
+    that false result, not "could not decide".
+    """
+    if len(text) % 2 or any(ch not in _HEX_DIGITS for ch in text):
+        return None
+    if not text:
+        return b""
+    return bytes.fromhex(text)
+
+
+def php_pack_h(fmt: str, payload: str) -> bytes | None:
+    """PHP `pack` for a single `H`, `Hn`, or `H*` code.
+
+    `H` consumes one nibble, `Hn` at most n nibbles, `H*` the rest. A nibble
+    that is not a hex digit is 0, and an odd count is padded with a low 0.
+    Other format strings are left undecoded.
+    """
+    fmt = fmt.replace("'", "").replace('"', "")
+    match = _PACK_H_RE.fullmatch(fmt)
+    if match is None:
+        return None
+    spec = match.group(1)
+    limit = None if spec == "*" else int(spec or "1")
+    if limit is not None and (limit < 0 or limit > 1_000_000):
+        return None
+    nibbles: list[int] = []
+    for ch in payload:
+        if limit is not None and len(nibbles) >= limit:
+            break
+        nibbles.append(_NIBBLE.get(ch, 0))
+        if len(nibbles) > 2_000_000:
+            return None
+    if len(nibbles) % 2:
+        nibbles.append(0)
+    out = bytearray()
+    for index in range(0, len(nibbles), 2):
+        out.append((nibbles[index] << 4) | nibbles[index + 1])
+    return bytes(out)
+
+
 def hex_payload_to_text(text: str, *, min_bytes: int = 2) -> str | None:
     data = hex_decode(text)
     if data is None or len(data) < min_bytes:

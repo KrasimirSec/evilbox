@@ -14,6 +14,8 @@ from evilbox.decode import (
     gzip_bytes,
     hex_decode,
     hex_payload_to_text,
+    php_hex2bin,
+    php_pack_h,
     looks_like_php_source,
     parse_quoted_string,
     php_bitwise_not,
@@ -757,7 +759,9 @@ def _apply_known_decoder(name: str | None, data: bytes) -> bytes | None:
     if key == "base64_decode":
         text = data.decode("latin-1")
         return b64decode(text)
-    if key in {"hex2bin", "hex2ascii", "hextobin", "unhex"}:
+    if key == "hex2bin":
+        return php_hex2bin(data.decode("latin-1"))
+    if key in {"hex2ascii", "hextobin", "unhex"}:
         return hex_decode(data.decode("latin-1"))
     return None
 
@@ -1493,8 +1497,8 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = as_str(values[0])
         if s is None:
             return None
-        data = hex_decode(s)
-        return Value(data) if data is not None else None
+        data = php_hex2bin(s)
+        return Value(False) if data is None else Value(data)
 
     if name in {"hex2ascii", "hextobin", "unhex"} and values:
         s = as_str(values[0])
@@ -1519,9 +1523,8 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         payload = as_str(values[1])
         if fmt is None or payload is None:
             return None
-        if fmt.replace("'", "") in {"H*", "H"}:
-            data = hex_decode(payload)
-            return Value(data) if data is not None else None
+        data = php_pack_h(fmt, payload)
+        return Value(data) if data is not None else None
 
     if name == "unpack" and len(values) >= 2:
         fmt = as_str(values[0])
@@ -1848,8 +1851,8 @@ def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None
         s = as_str(values[0])
         if s is None:
             return None
-        data = hex_decode(s)
-        return Value(data) if data is not None else None
+        data = php_hex2bin(s)
+        return Value(False) if data is None else Value(data)
     if name in {"hex2ascii", "hextobin", "unhex"} and values:
         s = as_str(values[0])
         if s is None:

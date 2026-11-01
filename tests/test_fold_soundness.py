@@ -109,6 +109,31 @@ echo '<input type="password" name="pwd" />';
     assert "dropper" not in {r.name for r in cls.roles}
 
 
+def test_php_hex_pack_does_not_invent_an_eval_payload():
+    """hex2bin and pack('H*') must not strip separators or widen a one-nibble code.
+
+    PHP hex2bin('65 76...') is false, and pack('H', <full hex>) is a single
+    nibble. Stripping the space or treating 'H' as 'H*' splices eval(\"id\")
+    for a sample that never runs it.
+    """
+    payload = 'eval("id");'
+    hexed = payload.encode().hex()
+    spaced = hexed[:2] + " " + hexed[2:]
+    clean = deobfuscate(f"<?php eval(hex2bin('{hexed}'));", language="php")
+    assert "id" in clean.text
+    rejected = deobfuscate(f"<?php eval(hex2bin('{spaced}'));", language="php")
+    assert "id" not in rejected.text
+    assert "false" in rejected.text
+    packed = deobfuscate(f"<?php eval(pack('H*', '{hexed}'));", language="php")
+    assert "id" in packed.text
+    spaced_pack = deobfuscate(f"<?php eval(pack('H*', '{spaced}'));", language="php")
+    assert "id" not in spaced_pack.text
+    one_nibble = deobfuscate(f"<?php eval(pack('H', '{hexed}'));", language="php")
+    assert "id" not in one_nibble.text
+    odd = deobfuscate("<?php echo bin2hex(pack('H*', '616'));", language="php")
+    assert "6160" in odd.text
+
+
 def test_eval_dumps_are_separate_layers():
     original = "<?php eval($x);"
     dump1 = '<?php file_get_contents("http://first.example/a");'

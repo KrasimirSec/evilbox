@@ -10,6 +10,8 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_hex2bin,
+    php_pack_h,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -103,6 +105,34 @@ def test_php_differential_property_folds():
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
+
+    for raw in ("", "61", "6162", "616", "61 62", "0x6162", "gg", "Ab", "6162\n"):
+        php_val = php_eval_json("hex2bin(" + _php_quote(raw) + ")")
+        ours = php_hex2bin(raw)
+        if ours is None:
+            assert php_val is False
+        else:
+            assert php_val == ours.decode("latin-1")
+    for fmt, raw in (
+        ("H*", "6"),
+        ("H*", "61"),
+        ("H*", "616"),
+        ("H", "6162"),
+        ("H1", "6162"),
+        ("H2", "6162"),
+        ("H3", "6162"),
+        ("H4", "61"),
+        ("H2", ""),
+        ("H*", "6g"),
+        ("H*", "GG"),
+        ("H*", "Ab"),
+        ("H*", "65 76"),
+    ):
+        php_val = php_eval_json(f"pack({_php_quote(fmt)}, {_php_quote(raw)})")
+        ours = php_pack_h(fmt, raw)
+        assert ours is not None
+        assert php_val == ours.decode("latin-1")
+    assert php_pack_h("h*", "61") is None
 
     chars = [chr(n) for n in range(32, 127) if chr(n) not in "'\\"]
     for _ in range(16):
