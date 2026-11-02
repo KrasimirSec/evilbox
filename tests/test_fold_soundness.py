@@ -109,6 +109,34 @@ echo '<input type="password" name="pwd" />';
     assert "dropper" not in {r.name for r in cls.roles}
 
 
+def test_php_condition_keeps_parens_and_string_zero_is_false():
+    """`if (!"0")` is true. Folding the parens away yields `if false`, which is
+    both the wrong branch and not PHP. A same-pass unpack used to keep that text.
+    """
+    src = """<?php
+if (!"0") { echo 'LIVE'; } else { echo 'DECOY'; }
+eval(base64_decode('ZWNobyAnUEFZTE9BRCc7'));
+while (!"0") { break; }
+$a = !"0";
+$b = !"0.0";
+$c = !"";
+"""
+    result = deobfuscate(src, language="php")
+    compact = result.text.replace(" ", "").replace("\n", "")
+    assert result.parse_ok
+    assert "if(true)" in compact
+    assert "while(true)" in compact
+    assert "$a=true" in compact
+    assert "$b=false" in compact
+    assert "$c=true" in compact
+    assert "LIVE" in result.text
+    assert "DECOY" in result.text
+    assert "PAYLOAD" in result.text
+    assert "if false" not in result.text
+    assert "if true" not in result.text
+    assert "base64_decode" not in result.text
+
+
 def test_eval_dumps_are_separate_layers():
     original = "<?php eval($x);"
     dump1 = '<?php file_get_contents("http://first.example/a");'

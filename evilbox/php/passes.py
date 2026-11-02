@@ -897,9 +897,31 @@ def _php_array_elements(node, source: str, env: FoldEnv | None) -> list[Value] |
     return elems
 
 
+# These parentheses belong to the statement, not the expression. Replacing the
+# whole node yields `if true {`, which is not PHP, and a same-pass unpack is
+# then kept despite the parse error.
+_SYNTAX_PAREN_PARENTS = frozenset(
+    {
+        "if_statement",
+        "else_if_clause",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "match_expression",
+    }
+)
+
+
+def _parens_are_syntax(node) -> bool:
+    parent = node.parent
+    return parent is not None and parent.type in _SYNTAX_PAREN_PARENTS
+
+
 def _render_if_simplified(node, source: str, env: FoldEnv | None = None) -> str | None:
     if env is not None:
         env.pending_splice = None
+    if node.type == "parenthesized_expression" and _parens_are_syntax(node):
+        return None
     if node.type == "string":
         return _simplified_string(node, source)
     if node.type in {
@@ -1240,7 +1262,7 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if val is None:
         return None
     if op == "!":
-        return Value(not bool(val.py))
+        return Value(not _php_truthy(val.py))
     if op in {"+", "-"} and isinstance(val.py, (int, float)) and not isinstance(val.py, bool):
         return Value(val.py if op == "+" else -val.py)
     if op == "~":
@@ -1356,6 +1378,23 @@ def _as_php_string(value: Any) -> str:
 
 def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _php_truthy(value: Any) -> bool:
+    """PHP boolean cast. The string `"0"` is false; `"0.0"` and `"00"` are true."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value not in {"", "0"}
+    if isinstance(value, (bytes, bytearray)):
+        return value not in {b"", b"0"}
+    if isinstance(value, (list, dict)):
+        return len(value) != 0
+    return True
 
 
 def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
