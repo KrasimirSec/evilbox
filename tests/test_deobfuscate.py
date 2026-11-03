@@ -296,6 +296,43 @@ def test_php_payload_assignment_kept_when_still_read():
     assert blob in result.text
 
 
+def test_php_unicode_escape_keeps_eval_bytes():
+    src = r"""<?php eval(substr("\u{00e9}system('id');", 2));"""
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "substr" not in result.text
+    assert "system('id')" in result.text
+    assert "ystem('id')" not in result.text.replace("system('id')", "")
+
+    emoji = r"""<?php eval(substr("\u{1F600}system('id');", 4));"""
+    result = deobfuscate(emoji, language="php")
+    assert result.parse_ok
+    assert "system('id')" in result.text
+    assert "tem('id')" not in result.text.replace("system('id')", "")
+
+    folded = r"""<?php $n = ord("\u{00e9}"); $h = bin2hex("\u{00e9}");"""
+    result = deobfuscate(folded, language="php")
+    assert result.parse_ok
+    assert "195" in result.text
+    assert "233" not in result.text
+    assert "c3a9" in result.text
+    assert "'e9'" not in result.text
+
+    ascii_escape = r"""<?php eval("\u{65}cho 'LIVE';");"""
+    result = deobfuscate(ascii_escape, language="php")
+    assert "echo 'LIVE'" in result.text
+
+    literal = r"""<?php $h = bin2hex("\\u{00e9}");"""
+    result = deobfuscate(literal, language="php")
+    assert "c3a9" not in result.text
+    assert "5c75" in result.text
+
+    invalid = r"""<?php $n = ord("\u{D800}");"""
+    result = deobfuscate(invalid, language="php")
+    assert r"\u{D800}" in result.text
+    assert "55296" not in result.text
+
+
 def test_fixture_js_fromcharcode():
     src = (FIXTURES / "fromcharcode.js").read_text(encoding="utf-8")
     result = deobfuscate(src, language="auto", path=str(FIXTURES / "fromcharcode.js"))

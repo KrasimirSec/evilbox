@@ -30,7 +30,7 @@ from evilbox.decode import (
     rot13,
     stripslashes,
     unescape_html_entities,
-    unescape_js_string_body,
+    unescape_php_double_quoted_body,
     uudecode_ex,
     xor_bytes,
     xor_strings,
@@ -1161,7 +1161,10 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
             if child.type in {"string_content", "encapsed_string_content"}:
                 parts.append(node_text(source, child))
             elif child.type == "escape_sequence":
-                parts.append(unescape_js_string_body(node_text(source, child)))
+                decoded = unescape_php_double_quoted_body(node_text(source, child))
+                if decoded is None:
+                    return None
+                parts.append(decoded)
             else:
                 val = const_eval(child, source, env)
                 if val is None or not isinstance(val.py, (str, int, float)) or isinstance(val.py, bool):

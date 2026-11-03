@@ -343,6 +343,50 @@ def unescape_js_string_body(body: str) -> str:
     return "".join(out)
 
 
+def unescape_php_double_quoted_body(body: str) -> str | None:
+    """Decode a PHP double-quoted body. ``\\u{hex}`` is UTF-8 bytes, not one character.
+
+    PHP stores the code point's UTF-8 encoding, so ``\\u{00e9}`` is the two bytes
+    ``C3 A9``. A code point that PHP rejects (surrogate, above U+10FFFF, or an
+    empty or non-hex brace) is left unfolded.
+    """
+    out: list[str] = []
+    plain: list[str] = []
+    i = 0
+    n = len(body)
+
+    def flush() -> None:
+        if plain:
+            out.append(unescape_js_string_body("".join(plain)))
+            plain.clear()
+
+    while i < n:
+        if body[i] == "\\" and i + 1 < n:
+            nxt = body[i + 1]
+            if nxt == "\\":
+                plain.append("\\\\")
+                i += 2
+                continue
+            if nxt == "u" and i + 2 < n and body[i + 2] == "{":
+                end = body.find("}", i + 3)
+                if end == -1:
+                    return None
+                hexpart = body[i + 3 : end]
+                if not re.fullmatch(r"[0-9A-Fa-f]+", hexpart):
+                    return None
+                code = int(hexpart, 16)
+                if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                    return None
+                flush()
+                out.append(chr(code).encode("utf-8").decode("latin-1"))
+                i = end + 1
+                continue
+        plain.append(body[i])
+        i += 1
+    flush()
+    return "".join(out)
+
+
 def parse_quoted_string(literal: str) -> str | None:
     if len(literal) < 2:
         return None
@@ -352,7 +396,7 @@ def parse_quoted_string(literal: str) -> str | None:
     body = literal[1:-1]
     if quote == "'":
         return body.replace("\\'", "'").replace("\\\\", "\\")
-    return unescape_js_string_body(body)
+    return unescape_php_double_quoted_body(body)
 
 
 def unescape_html_entities(text: str) -> str:

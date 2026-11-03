@@ -16,6 +16,7 @@ from evilbox.decode import (
     php_substr,
     raw_inflate,
     stripslashes,
+    unescape_php_double_quoted_body,
     uudecode_ex,
     xor_strings,
 )
@@ -109,3 +110,14 @@ def test_php_differential_property_folds():
         raw = "".join(rng.choice(chars) for _ in range(rng.randint(1, 12)))
         php_val = php_eval_json("~" + _php_quote(raw))
         assert php_val == php_bitwise_not(raw)
+
+
+def test_php_unicode_escape_is_utf8_bytes():
+    assert unescape_php_double_quoted_body(r"\u{00e9}") == "\xc3\xa9"
+    assert unescape_php_double_quoted_body(r"\u{41}") == "A"
+    assert unescape_php_double_quoted_body(r"\u{1F600}") == "\xf0\x9f\x98\x80"
+    assert unescape_php_double_quoted_body(r"\n\u{65}") == "\ne"
+    assert unescape_php_double_quoted_body(r"\\u{00e9}") == r"\u{00e9}"
+    assert unescape_php_double_quoted_body(r"\u{D800}") is None
+    assert unescape_php_double_quoted_body(r"\u{110000}") is None
+    assert unescape_php_double_quoted_body(r"\u{}") is None
