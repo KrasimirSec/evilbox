@@ -12,6 +12,83 @@ from evilbox.pipeline import deobfuscate
 from evilbox.signature import STRING_LIT_RE, extract_surface
 
 
+def test_js_nested_write_does_not_keep_the_decoy_branch():
+    src = """var a = "decoy";
+function flip() { a = "live"; }
+flip();
+if ((a + "") === "decoy") { decoy(); } else { live(); }
+"""
+    result = deobfuscate(src, language="js")
+    assert "live()" in result.text
+    assert "decoy()" in result.text
+    assert "(a +" in result.text or "a +" in result.text
+
+
+def test_js_iife_write_and_param_shadow():
+    written = """var a = "decoy";
+(function () { a = "live"; })();
+if ((a + "") === "decoy") { decoy(); } else { live(); }
+"""
+    result = deobfuscate(written, language="js")
+    assert "live()" in result.text
+    assert "decoy()" in result.text
+
+    shadowed = """function flip(a) { a = "live"; }
+var a = "decoy";
+var b = a + "!";
+"""
+    result = deobfuscate(shadowed, language="js")
+    assert "decoy!" in result.text
+
+
+def test_php_outer_writes_are_not_folded():
+    global_src = """<?php
+$a = "decoy";
+function flip() { global $a; $a = "live"; }
+flip();
+echo $a . "";
+"""
+    result = deobfuscate(global_src, language="php")
+    compact = result.text.replace(" ", "")
+    assert "echo'decoy'" not in compact
+    assert "echo$a." in compact
+
+    ref_src = """<?php
+function flip(&$a) { $a = "live"; }
+$a = "decoy";
+flip(&$a);
+echo $a . "";
+"""
+    result = deobfuscate(ref_src, language="php")
+    assert "echo 'decoy'" not in result.text
+    assert "$a" in result.text.split("echo", 1)[-1]
+
+    use_src = """<?php
+$a = "decoy";
+$flip = function () use (&$a) { $a = "live"; };
+$flip();
+echo $a . "";
+"""
+    result = deobfuscate(use_src, language="php")
+    assert "echo 'decoy'" not in result.text
+
+    globals_src = """<?php
+$a = "decoy";
+$GLOBALS["a"] = "live";
+echo $a . "";
+"""
+    result = deobfuscate(globals_src, language="php")
+    assert "echo 'decoy'" not in result.text
+
+    local_src = """<?php
+$a = "decoy";
+function flip() { $a = "live"; }
+echo $a . "!";
+"""
+    result = deobfuscate(local_src, language="php")
+    assert "decoy!" in result.text
+
+
 def test_php_reassignment_is_not_folded():
     src = "<?php $a='base64_decode'; echo $a('aGVsbG8='); $a='strrev';"
     result = deobfuscate(src, language="php")
