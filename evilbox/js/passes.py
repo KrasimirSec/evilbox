@@ -22,6 +22,7 @@ from evilbox.decode import (
 from evilbox.js.structure import simplify_js_structure
 from evilbox.parsers import parse_js
 from evilbox.rewrite import (
+    FUNCTION_TYPES,
     apply_replacements,
     enclosing_function_id,
     inside_branch,
@@ -218,8 +219,137 @@ def collect_const_arrays(tree, source: str) -> dict[str, list[Value]]:
     return out
 
 
+def _enclosing_function(node):
+    parent = node.parent
+    while parent is not None:
+        if parent.type in FUNCTION_TYPES:
+            return parent
+        parent = parent.parent
+    return None
+
+
+def _function_var_params(func, source: str) -> set[str]:
+    """Names that shadow the whole function: parameters, `var`, and the function name.
+
+    `let` / `const` are block-scoped, so an assignment elsewhere in the function
+    can still write an outer binding. Treating those as a shadow would hide that write.
+    `var` inside an arrow belongs to the enclosing function, not the arrow.
+    """
+    names: set[str] = set()
+    if func.type in {"function_declaration", "function_expression"}:
+        name_node = func.child_by_field_name("name")
+        if name_node is not None and name_node.type == "identifier":
+            names.add(node_text(source, name_node))
+    if func.type == "arrow_function":
+        param = func.child_by_field_name("parameter")
+        if param is not None and param.type == "identifier":
+            names.add(node_text(source, param))
+    params = func.child_by_field_name("parameters")
+    if params is not None:
+        for child in params.named_children:
+            if child.type == "identifier":
+                names.add(node_text(source, child))
+            elif child.type == "rest_pattern":
+                ident = next((item for item in child.named_children if item.type == "identifier"), None)
+                if ident is not None:
+                    names.add(node_text(source, ident))
+    if func.type == "arrow_function":
+        return names
+    body = func.child_by_field_name("body")
+    if body is None:
+        return names
+    stack = list(body.children)
+    while stack:
+        node = stack.pop()
+        if node.type in FUNCTION_TYPES:
+            continue
+        if (
+            node.type == "variable_declarator"
+            and node.parent is not None
+            and node.parent.type == "variable_declaration"
+        ):
+            name_node = node.child_by_field_name("name")
+            if name_node is not None and name_node.type == "identifier":
+                names.add(node_text(source, name_node))
+        stack.extend(node.children)
+    return names
+
+
+def _pattern_names(node, source: str) -> list[str]:
+    """Bindings written by an assignment target, not property keys."""
+    if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
+        return [node_text(source, node)]
+    if node.type == "pair_pattern":
+        names: list[str] = []
+        for child in node.named_children:
+            if child.type == "property_identifier":
+                continue
+            names.extend(_pattern_names(child, source))
+        return names
+    if node.type in {
+        "array_pattern",
+        "object_pattern",
+        "rest_pattern",
+        "assignment_pattern",
+        "parenthesized_expression",
+    }:
+        names = []
+        for child in node.named_children:
+            names.extend(_pattern_names(child, source))
+        return names
+    return []
+
+
+def _names_escaped_by_nested_writes(tree, source: str) -> set[str]:
+    """Names assigned from a nested function without a shadowing `var` or parameter.
+
+    `var a = "decoy"; function f() { a = "live"; } f();` writes the outer `a`.
+    Folding `a` from the initializer keeps the decoy and dead-branch removal
+    deletes the call that actually runs.
+    """
+    locals_cache: dict[int, set[str]] = {}
+
+    def locals_of(func) -> set[str]:
+        cached = locals_cache.get(func.start_byte)
+        if cached is None:
+            cached = _function_var_params(func, source)
+            locals_cache[func.start_byte] = cached
+        return cached
+
+    escaped: set[str] = set()
+
+    def consider(node, names: list[str]) -> None:
+        func = _enclosing_function(node)
+        if func is None or not names:
+            return
+        local = locals_of(func)
+        for name in names:
+            if name not in local:
+                escaped.add(name)
+
+    for node in walk(tree.root_node):
+        if node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None:
+                consider(left, _pattern_names(left, source))
+        elif node.type == "augmented_assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                consider(left, [node_text(source, left)])
+        elif node.type == "update_expression":
+            arg = node.child_by_field_name("argument")
+            if arg is not None and arg.type == "identifier":
+                consider(arg, [node_text(source, arg)])
+        elif node.type == "for_in_statement" and node.child_by_field_name("kind") is None:
+            left = node.child_by_field_name("left")
+            if left is not None:
+                consider(left, _pattern_names(left, source))
+    return escaped
+
+
 def collect_env(tree, source: str) -> FoldEnv:
     env = FoldEnv()
+    escaped = _names_escaped_by_nested_writes(tree, source)
     assign_count: dict[ScopeKey, int] = {}
     for node in walk(tree.root_node):
         if node.type == "variable_declarator":
@@ -244,7 +374,7 @@ def collect_env(tree, source: str) -> FoldEnv:
             continue
         name = node_text(source, name_node)
         key = env.key(name_node, name)
-        if assign_count.get(key, 0) != 1:
+        if name in escaped or assign_count.get(key, 0) != 1:
             continue
         if inside_loop(node) or inside_branch(node):
             continue

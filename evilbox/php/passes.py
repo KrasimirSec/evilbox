@@ -816,7 +816,36 @@ def _tainted_php_names(tree, source: str) -> set[str | ScopeKey]:
         if t in {"global_declaration", "global_statement"}:
             for child in node.named_children:
                 if child.type == "variable_name":
-                    names.add((enclosing_function_id(child), node_text(source, child).lstrip("$")))
+                    name = node_text(source, child).lstrip("$")
+                    names.add((enclosing_function_id(child), name))
+                    # `global $a` aliases the top-level binding, not the enclosing function.
+                    names.add((0, name))
+        if t == "argument" and any(child.type == "reference_modifier" for child in node.children):
+            var = next((child for child in node.children if child.type == "variable_name"), None)
+            if var is not None:
+                names.add((enclosing_function_id(var), node_text(source, var).lstrip("$")))
+        if (
+            t == "by_ref"
+            and node.parent is not None
+            and node.parent.type == "anonymous_function_use_clause"
+            and node.parent.parent is not None
+        ):
+            var = next((child for child in node.children if child.type == "variable_name"), None)
+            if var is not None:
+                # `use (&$a)` writes the scope that created the closure.
+                names.add((enclosing_function_id(node.parent.parent), node_text(source, var).lstrip("$")))
+        if t in {"assignment_expression", "augmented_assignment_expression"}:
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "subscript_expression":
+                named = left.named_children
+                if (
+                    len(named) >= 2
+                    and named[0].type == "variable_name"
+                    and node_text(source, named[0]) == "$GLOBALS"
+                ):
+                    raw = node_text(source, named[1])
+                    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"" and "\\" not in raw and "$" not in raw:
+                        names.add((0, raw[1:-1]))
         if t == "foreach_statement":
             for child in node.named_children:
                 if child.type == "variable_name":
