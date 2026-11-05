@@ -27,6 +27,14 @@ _SAFE_DOT_OBJECT = {
     "template_string",
 }
 _COMPARE_OPS = {"===", "==", "!==", "!="}
+# Parents that already hold a statement list. Anywhere else, one statement
+# is the whole body (`if (c) a(), b();`), so a split has to stay one statement.
+_STATEMENT_LIST_PARENTS = frozenset({
+    "statement_block",
+    "program",
+    "switch_case",
+    "switch_default",
+})
 _PURE_SKIP = {
     "call_expression",
     "identifier",
@@ -878,6 +886,20 @@ def _binding_defined(tree, source: str, name: str) -> bool:
     return _name_counts(tree, source).get(name, 0) > 0
 
 
+def _sequence_statements(node, body: str) -> str:
+    """Split a comma sequence without changing which statements the parent owns.
+
+    `while (i < 3) console.log(i), i++;` is a single loop body. Emitting the
+    increment as the next statement leaves `console.log(i)` spinning forever,
+    and `if (!user) return log("deny"), false;` otherwise returns false on
+    the success path too. Brace the list when the parent is not a block.
+    """
+    parent = node.parent
+    if parent is not None and parent.type in _STATEMENT_LIST_PARENTS:
+        return body + "\n"
+    return "{\n" + body + "\n}\n"
+
+
 def _cleanup_replacements(tree, source: str):
     reps = []
     undefined_free = not _binding_defined(tree, source, "undefined")
@@ -890,7 +912,7 @@ def _cleanup_replacements(tree, source: str):
                 if len(parts) >= 2:
                     text = "\n".join(f"{node_text(source, part)};" for part in parts)
                     start, end = stmt_span(source, node)
-                    reps.append((start, end, text + "\n"))
+                    reps.append((start, end, _sequence_statements(node, text)))
                     continue
         if node.type == "return_statement" and node.named_children:
             expr = _unwrap(node.named_children[0])
@@ -900,7 +922,7 @@ def _cleanup_replacements(tree, source: str):
                     head = "\n".join(f"{node_text(source, part)};" for part in parts[:-1])
                     text = f"{head}\nreturn {node_text(source, parts[-1])};"
                     start, end = stmt_span(source, node)
-                    reps.append((start, end, text + "\n"))
+                    reps.append((start, end, _sequence_statements(node, text)))
                     continue
         if node.type == "sequence_expression":
             parts = list(node.named_children)
