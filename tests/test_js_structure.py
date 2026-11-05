@@ -190,6 +190,43 @@ console["log"]("hi");
     assert "console.log" in result.text
 
 
+def test_js_comma_sequence_stays_inside_unbraced_body():
+    early = deobfuscate(
+        'function auth(user) {\n  if (!user) return log("deny"), false;\n  return true;\n}\n',
+        language="js",
+    )
+    assert early.parse_ok
+    deny = early.text.find('log("deny")')
+    returned = early.text.find("return false")
+    success = early.text.find("return true")
+    assert 0 <= deny < returned < success
+    assert "{" in early.text[early.text.find("if") : returned]
+
+    loop = deobfuscate("var i = 0;\nwhile (i < 3) console.log(i), i++;\n", language="js")
+    assert loop.parse_ok
+    while_at = loop.text.find("while")
+    inc = loop.text.find("i++")
+    close = loop.text.find("}", while_at)
+    assert while_at >= 0 and while_at < inc < close
+
+    body = deobfuscate("for (var i = 0; i < 3; i++) a(), b();\n", language="js")
+    assert body.parse_ok
+    for_at = body.text.find("for")
+    close = body.text.find("}", for_at)
+    assert for_at < body.text.find("a();") < body.text.find("b();") < close
+
+    other = deobfuscate(
+        'function auth(user) {\n  if (user) grant(); else return log("deny"), false;\n  return true;\n}\n',
+        language="js",
+    )
+    assert other.parse_ok
+    else_at = other.text.find("else")
+    returned = other.text.find("return false")
+    success = other.text.find("return true")
+    assert else_at < returned < success
+    assert "{" in other.text[else_at:returned]
+
+
 def test_js_void_zero_kept_when_undefined_is_bound():
     src = "var undefined = 1; var x = void 0;"
     result = deobfuscate(src, language="js")
