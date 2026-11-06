@@ -33,6 +33,35 @@ def b64decode(text: str) -> bytes | None:
     return None
 
 
+# ASCII whitespace from the Infra spec. Vertical tab is not included.
+_JS_ATOB_WS = frozenset("\t\n\f\r ")
+_JS_ATOB_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+
+def js_atob_bytes(text: str) -> bytes | None:
+    """Bytes from JavaScript `atob`, or None when it would throw.
+
+    Follows the Infra forgiving-base64 decode: strip ASCII whitespace, accept
+    padding only when the length is a multiple of four, and reject a remainder
+    of one or any character outside the standard alphabet. Python's decoder
+    drops those characters and would invent a payload.
+    """
+    if not isinstance(text, str):
+        return None
+    data = "".join(ch for ch in text if ch not in _JS_ATOB_WS)
+    if len(data) % 4 == 0 and data.endswith("="):
+        data = data[:-2] if data.endswith("==") else data[:-1]
+    if len(data) % 4 == 1:
+        return None
+    if any(ch not in _JS_ATOB_ALPHABET for ch in data):
+        return None
+    padded = data + ("=" * ((-len(data)) % 4))
+    try:
+        return base64.b64decode(padded, validate=True)
+    except Exception:
+        return None
+
+
 def hex_decode(text: str) -> bytes | None:
     cleaned = text.strip()
     if re.search(r"\\x[0-9a-fA-F]{2}", cleaned, re.I):

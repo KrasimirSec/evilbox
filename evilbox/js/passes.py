@@ -8,6 +8,7 @@ from typing import Any
 from evilbox.decode import (
     b64decode,
     bytes_to_text,
+    js_atob_bytes,
     format_js_number,
     hex_payload_to_text,
     js_quote,
@@ -1140,7 +1141,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = values[0].py if values and isinstance(values[0].py, str) else None
         if s is None:
             return None
-        data = b64decode(s)
+        data = js_atob_bytes(s)
         if data is None:
             return None
         text = bytes_to_text(data)

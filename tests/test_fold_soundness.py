@@ -137,3 +137,36 @@ def test_eval_dumps_are_separate_layers():
         assert time.perf_counter() - started < 0.5
 
     _run()
+
+
+def test_js_atob_invalid_input_does_not_drop_the_other_branch():
+    """atob throws on bad padding and non-alphabet characters.
+
+    A lenient decoder turned `atob("YQ=")` into `"a"` and `atob("YQ==YQ==")`
+    into the first chunk. The comparison was then true, and dead-branch
+    removal kept the decoy.
+    """
+    padded = deobfuscate(
+        'if (atob("YQ=") === "a") decoy(); else live();\n',
+        language="js",
+    )
+    assert padded.parse_ok
+    assert "live" in padded.text
+    assert "decoy" in padded.text
+    assert "atob" in padded.text
+
+    embedded = deobfuscate(
+        'if (atob("YQ==YQ==") === "a") decoy(); else live();\n',
+        language="js",
+    )
+    assert embedded.parse_ok
+    assert "live" in embedded.text
+    assert "decoy" in embedded.text
+
+    valid = deobfuscate(
+        'if (atob(" \\fYQ==\\n") === "a") live(); else decoy();\n',
+        language="js",
+    )
+    assert valid.parse_ok
+    assert "live" in valid.text
+    assert "decoy" not in valid.text
