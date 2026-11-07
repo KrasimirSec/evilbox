@@ -439,7 +439,14 @@ def _safe_write_text(path: Path, text: str, root: Path) -> None:
         raise SandboxError(f"refusing to write outside log dir: {path}") from exc
     if path.is_symlink() or path.parent.is_symlink():
         raise SandboxError(f"refusing to write through a symlink: {path}")
-    path.write_text(text, encoding="utf-8")
+    encoding = "utf-8"
+    if path.suffix.lower() in {".php", ".phtml", ".php5", ".php7", ".phps"}:
+        try:
+            text.encode("latin-1")
+            encoding = "latin-1"
+        except UnicodeEncodeError:
+            encoding = "utf-8"
+    path.write_text(text, encoding=encoding)
 
 
 def finalize_logs(log_dir: Path) -> tuple[list[str], list[Path]]:

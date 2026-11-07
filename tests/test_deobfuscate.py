@@ -309,3 +309,28 @@ def test_fixture_php_eval_base64():
     assert result.language == "php"
     assert "echo" in result.text
     assert "hi" in result.text
+
+
+def test_php_high_bytes_are_hex_escapes():
+    """Bytes 0x80-0xFF must not be raw characters in the cleaned source.
+
+    The CLI saves UTF-8. A raw U+00C3 U+00A9 becomes the four bytes C3 83 C2 A9,
+    so ``chr(195).chr(169)`` (UTF-8 é, and the tail of many decoded URLs) no
+    longer matches what PHP ran.
+    """
+    src = "<?php $s = chr(195).chr(169).chr(101);"
+    result = deobfuscate(src, language="php")
+    assert r"\xc3\xa9e" in result.text
+    assert all(ord(ch) < 128 for ch in result.text)
+
+    tilde = deobfuscate("<?php $s = ~'A';", language="php")
+    assert r"\xbe" in tilde.text
+    assert all(ord(ch) < 128 for ch in tilde.text)
+
+    from evilbox.phpdiff import php_binary, php_eval_json
+
+    if php_binary() is None:
+        return
+    folded = result.text.split("=", 1)[1].strip().rstrip(";")
+    assert php_eval_json(folded) == php_eval_json("chr(195).chr(169).chr(101)")
+    assert php_eval_json(r'"\xbe"') == php_eval_json("~'A'")

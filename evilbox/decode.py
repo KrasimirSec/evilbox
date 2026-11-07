@@ -563,10 +563,13 @@ def php_quote(value: str) -> str:
     """PHP literal for a byte string.
 
     Single quotes cannot spell NUL or other controls without embedding the raw
-    byte, and tree-sitter rejects a raw NUL inside quotes. Those values use
-    double quotes and `\\xHH`, so a later fold still parses.
+    byte, and tree-sitter rejects a raw NUL inside quotes. Bytes at or above
+    0x80 are not written raw either: the cleaned file is UTF-8, so U+00E9
+    would become the two bytes C3 A9 and no longer match ``chr(233)``. Those
+    values use double quotes and ``\\xHH``, so a later fold still parses and
+    PHP still sees one byte.
     """
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    if any(ord(ch) < 32 or ord(ch) >= 127 for ch in value):
         return _php_double_quote(value)
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
@@ -587,10 +590,11 @@ def _php_double_quote(value: str) -> str:
             out.append("\\r")
         elif ch == "\t":
             out.append("\\t")
-        elif code < 32 or code == 127:
-            out.append(f"\\x{code:02x}")
-        elif code > 255:
-            out.append(f"\\u{{{code:x}}}")
+        elif code < 32 or code >= 127:
+            if code > 255:
+                out.append(f"\\u{{{code:x}}}")
+            else:
+                out.append(f"\\x{code:02x}")
         else:
             out.append(ch)
     return '"' + "".join(out) + '"'
