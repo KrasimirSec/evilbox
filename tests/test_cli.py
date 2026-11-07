@@ -18,6 +18,17 @@ def test_cli_output_file(tmp_path):
     assert "3" in dest.read_text(encoding="utf-8")
 
 
+def test_cli_php_high_bytes_round_trip(tmp_path):
+    src = tmp_path / "high.php"
+    src.write_bytes(b"<?php $s = chr(195).chr(169);")
+    dest = tmp_path / "clean.php"
+    assert main([str(src), "-o", str(dest), "--lang", "php"]) == 0
+    saved = dest.read_bytes()
+    assert b"\\xc3\\xa9" in saved
+    # A UTF-8 read of the cleaned file is the same text PHP will parse.
+    assert "\\xc3\\xa9" in dest.read_text(encoding="utf-8")
+
+
 def test_cli_report_json(tmp_path, capsys):
     src = tmp_path / "packed.php"
     src.write_text("<?php eval($_POST['x']);", encoding="utf-8")
