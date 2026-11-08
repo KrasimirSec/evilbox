@@ -18,6 +18,22 @@ def test_php_string_xor():
     assert "p" in result.text.lower()
 
 
+def test_php_string_xor_keeps_bytes_past_the_shorter_operand():
+    """A shorter key is NUL-padded, so the tail of the payload still runs.
+
+    PHP `^` does not repeat the key and does not stop at the shorter length.
+    Truncating here turned `eval($code ^ $mask)` into `e;` and dropped the shell.
+    """
+    src = r"""<?php
+$mask = "\x07";
+$code = "\x62cho 'LIVE';";
+eval($code ^ $mask);
+"""
+    result = deobfuscate(src, language="php")
+    assert "echo 'LIVE';" in result.text
+    assert "\ne;" not in result.text
+
+
 def test_php_assert_base64():
     inner = 'echo "asserted";'
     b64 = base64.b64encode(inner.encode()).decode()

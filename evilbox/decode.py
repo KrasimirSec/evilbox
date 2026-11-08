@@ -665,10 +665,13 @@ def pick_repeating_xor_text(
 
 
 def xor_strings(left: str, right: str) -> str:
+    """PHP `^` on strings. The shorter operand is padded with NUL bytes."""
     a = php_string_bytes(left)
     b = php_string_bytes(right)
-    n = min(len(a), len(b))
-    return bytes(x ^ y for x, y in zip(a[:n], b[:n])).decode("latin-1")
+    width = max(len(a), len(b))
+    a = a.ljust(width, b"\x00")
+    b = b.ljust(width, b"\x00")
+    return bytes(x ^ y for x, y in zip(a, b)).decode("latin-1")
 
 
 def rc4_crypt(data: bytes, key: bytes) -> bytes | None:
