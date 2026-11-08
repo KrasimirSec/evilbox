@@ -43,6 +43,16 @@ def test_php_bitwise_not_rejects_non_bytes():
         xor_strings("A", "Ω")
 
 
+def test_xor_strings_pads_shorter_operand_with_nul():
+    assert xor_strings("P", " ") == "p"
+    assert xor_strings("AAAA", "B") == "\x03AAA"
+    assert xor_strings("B", "AAAA") == "\x03AAA"
+    assert xor_strings("echo 'LIVE';", "\x00\x00") == "echo 'LIVE';"
+    assert xor_strings("", "abc") == "abc"
+    assert xor_strings("abc", "") == "abc"
+    assert xor_strings("", "") == ""
+
+
 def test_php_substr_version_oob():
     assert php_substr("abc", 10, php_version="8.3") == ""
     assert php_substr("abc", 10, php_version="7.4") is False
