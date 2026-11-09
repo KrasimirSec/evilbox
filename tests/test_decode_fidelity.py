@@ -10,6 +10,8 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_html_entity_decode,
+    php_htmlspecialchars_decode,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -41,6 +43,22 @@ def test_php_bitwise_not_rejects_non_bytes():
         php_string_bytes("日本語")
     with pytest.raises(ValueError):
         xor_strings("A", "Ω")
+
+
+def test_php_html_entity_decode_utf8_and_specials():
+    assert php_html_entity_decode("&#233;echo") == "\u00c3\u00a9echo"
+    assert php_html_entity_decode("&eacute;") == "\u00c3\u00a9"
+    assert php_html_entity_decode("&lt;b&gt;") == "<b>"
+    assert php_html_entity_decode("&amp;amp;") == "&amp;"
+    assert php_html_entity_decode("A&#1;B&#233;C") == "A&#1;B\u00c3\u00a9C"
+    assert php_html_entity_decode("&apos;") == "&apos;"
+    assert php_html_entity_decode("&#128;") == "&#128;"
+    assert php_html_entity_decode("&#256;") == "\u00c4\u0080"
+    assert php_htmlspecialchars_decode("&#101;cho") == "&#101;cho"
+    assert php_htmlspecialchars_decode("&lt;&amp;&gt;&quot;") == '<&>"'
+    assert php_htmlspecialchars_decode("&#039;") == "'"
+    assert php_htmlspecialchars_decode("&apos;") == "&apos;"
+    assert php_htmlspecialchars_decode("&eacute;") == "&eacute;"
 
 
 def test_php_substr_version_oob():

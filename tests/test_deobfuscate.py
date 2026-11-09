@@ -309,3 +309,19 @@ def test_fixture_php_eval_base64():
     assert result.language == "php"
     assert "echo" in result.text
     assert "hi" in result.text
+
+
+def test_php_html_entity_decode_is_utf8_bytes():
+    """&#233; is two UTF-8 bytes, so substr(2) starts at the command."""
+    src = """<?php eval(substr(html_entity_decode("&#233;system('id');"), 2));"""
+    result = deobfuscate(src, language="php")
+    assert "system('id');" in result.text
+    assert "html_entity_decode" not in result.text
+
+
+def test_php_htmlspecialchars_decode_does_not_invent_numeric_payload():
+    """htmlspecialchars_decode leaves &#101; alone, so eval does not become echo."""
+    src = """<?php eval(htmlspecialchars_decode("&#101;cho 'LIVE';"));"""
+    result = deobfuscate(src, language="php")
+    assert "echo 'LIVE'" not in result.text
+    assert "&#101;" in result.text

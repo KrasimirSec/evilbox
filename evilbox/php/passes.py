@@ -22,6 +22,8 @@ from evilbox.decode import (
     php_str_pad,
     php_strtolower,
     php_strtoupper,
+    php_html_entity_decode,
+    php_htmlspecialchars_decode,
     php_substr,
     php_urldecode,
     quoted_printable_decode,
@@ -1671,8 +1673,16 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return None
 
     if name in {"html_entity_decode", "htmlspecialchars_decode"} and values:
+        # Flags and charset change which entities decode and how many bytes
+        # each one occupies. Only the default call is folded.
+        if len(values) > 1:
+            return None
         s = as_str(values[0])
-        return Value(unescape_html_entities(s)) if s is not None else None
+        if s is None:
+            return None
+        decode = php_html_entity_decode if name == "html_entity_decode" else php_htmlspecialchars_decode
+        out = decode(s)
+        return Value(out) if out is not None else None
 
     if name == "stripslashes" and values:
         s = as_str(values[0])
