@@ -7,6 +7,7 @@ import binascii
 import codecs
 import hashlib
 import html
+import html.entities
 import quopri
 import re
 import zlib
@@ -362,6 +363,79 @@ def unescape_html_entities(text: str) -> str:
     if any(ord(ch) > 255 for ch in out):
         return text
     return out
+
+
+# PHP html_entity_decode (default ENT_HTML401, UTF-8) leaves C0/C1 controls,
+# surrogates, and non-scalar values as literal entity text. Everything else
+# is emitted as UTF-8 bytes, which is what substr/strlen then count.
+_PHP_ENTITY_RE = re.compile(r"&(?:#([0-9]+)|#([xX][0-9A-Fa-f]+)|([A-Za-z][A-Za-z0-9]*));")
+_PHP_SPECIAL_CHARS = {
+    "lt": ord("<"),
+    "gt": ord(">"),
+    "amp": ord("&"),
+    "quot": ord('"'),
+}
+_PHP_SPECIAL_CODES = {34, 38, 39, 60, 62}
+
+
+def _php_entity_scalar(code: int) -> bool:
+    if code in (9, 10, 13) or 32 <= code <= 126:
+        return True
+    if 160 <= code <= 0xD7FF or 0xE000 <= code <= 0x10FFFF:
+        return True
+    return False
+
+
+def _php_utf8_bytes(code: int) -> str:
+    return chr(code).encode("utf-8").decode("latin-1")
+
+
+def php_html_entity_decode(text: str) -> str | None:
+    """PHP html_entity_decode with the default flags and UTF-8 charset.
+
+    The result is a PHP byte string: U+00E9 is the two bytes C3 A9, not one
+    character. A non-byte input is refused so the caller leaves the call folded.
+    """
+    if any(ord(ch) > 255 for ch in text):
+        return None
+
+    def repl(match: re.Match[str]) -> str:
+        decimal, hexpart, name = match.group(1), match.group(2), match.group(3)
+        if name is not None:
+            code = html.entities.name2codepoint.get(name)
+            if code is None:
+                return match.group(0)
+        else:
+            code = int(decimal, 10) if decimal is not None else int(hexpart[1:], 16)
+        if not _php_entity_scalar(code):
+            return match.group(0)
+        return _php_utf8_bytes(code)
+
+    return _PHP_ENTITY_RE.sub(repl, text)
+
+
+def php_htmlspecialchars_decode(text: str) -> str | None:
+    """PHP htmlspecialchars_decode with the default ENT_QUOTES | ENT_HTML401 flags.
+
+    Only the five special characters are reversed. Numeric character references
+    such as ``&#101;`` stay text, and ``&apos;`` is not an HTML 4.01 entity.
+    """
+    if any(ord(ch) > 255 for ch in text):
+        return None
+
+    def repl(match: re.Match[str]) -> str:
+        decimal, hexpart, name = match.group(1), match.group(2), match.group(3)
+        if name is not None:
+            code = _PHP_SPECIAL_CHARS.get(name)
+            if code is None:
+                return match.group(0)
+        else:
+            code = int(decimal, 10) if decimal is not None else int(hexpart[1:], 16)
+            if code not in _PHP_SPECIAL_CODES:
+                return match.group(0)
+        return chr(code)
+
+    return _PHP_ENTITY_RE.sub(repl, text)
 
 
 def looks_like_php_source(text: str) -> bool:
