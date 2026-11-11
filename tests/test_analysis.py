@@ -54,6 +54,14 @@ def test_php_chr_and_strtr():
     assert "zbc" in result.text
 
 
+def test_php_chr_infinity_does_not_abort():
+    src = "<?php echo chr(1e309); echo chr(65); echo 'http://evil.example/payload';"
+    result = deobfuscate(src, language="php")
+    assert "http://evil.example/payload" in result.text
+    assert "chr(1e309)" in result.text
+    assert "'A'" in result.text or '"A"' in result.text
+
+
 def test_layers_include_original_and_inner():
     inner = "echo 1;"
     b64 = base64.b64encode(inner.encode()).decode()

@@ -973,6 +973,12 @@ def _from_char_code(values: list[Value]) -> Value | None:
             continue
         if not _is_num(val.py):
             return None
+        # Infinity/NaN are not ints. int(1e309) raises OverflowError and aborts
+        # the whole decode, so a later payload in the same file is dropped.
+        # ToUint16 of a non-finite value is 0, but a raw NUL does not parse, so
+        # leave the call in place instead of folding it.
+        if isinstance(val.py, float) and not math.isfinite(val.py):
+            return None
         chars.append(chr(int(val.py) & 0xFFFF))
     return Value("".join(chars))
 
