@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -1536,7 +1537,12 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             return Value(text if text is not None else data.decode("latin-1"))
 
     if name == "chr" and values and _is_num(values[0].py):
-        return Value(chr(int(values[0].py) & 0xFF))
+        raw = values[0].py
+        # chr(1e309) is non-finite. int() raises OverflowError and aborts the
+        # decode before later statements are folded.
+        if isinstance(raw, float) and not math.isfinite(raw):
+            return None
+        return Value(chr(int(raw) & 0xFF))
 
     if name == "strtr" and values:
         hay = as_str(values[0])

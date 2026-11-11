@@ -16,6 +16,20 @@ def test_js_fromcharcode_and_concat():
     assert "fromCharCode" not in result.text
 
 
+def test_js_fromcharcode_infinity_does_not_abort():
+    src = (
+        'String.fromCharCode(1e309);'
+        ' String.fromCharCode.apply(null, [1e309]);'
+        ' var hi = String.fromCharCode(72, 105);'
+        ' var live = "http://evil.example/payload";'
+    )
+    result = deobfuscate(src, language="js")
+    assert "http://evil.example/payload" in result.text
+    assert "Hi" in result.text
+    assert "fromCharCode(1e309)" in result.text
+    assert "fromCharCode.apply" in result.text
+
+
 def test_js_eval_atob():
     inner = "console.log('hi');"
     b64 = base64.b64encode(inner.encode()).decode()
