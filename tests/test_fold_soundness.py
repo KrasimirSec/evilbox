@@ -109,6 +109,21 @@ echo '<input type="password" name="pwd" />';
     assert "dropper" not in {r.name for r in cls.roles}
 
 
+def test_php_array_string_cast_is_the_word_array():
+    src = """<?php
+$a = array('id');
+system($a . '');
+echo implode('|', array('a', array('b'), 'c'));
+echo array('k' => 'v') . 'Z';
+"""
+    result = deobfuscate(src, language="php")
+    text = result.text
+    assert "Value(" not in text
+    assert "system('Array')" in text
+    assert "'a|Array|c'" in text
+    assert "'ArrayZ'" in text
+
+
 def test_eval_dumps_are_separate_layers():
     original = "<?php eval($x);"
     dump1 = '<?php file_get_contents("http://first.example/a");'

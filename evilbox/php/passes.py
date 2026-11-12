@@ -1343,12 +1343,17 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
 
 def _as_php_string(value: Any) -> str:
+    """PHP string cast. Arrays become the word Array, not their elements."""
+    if isinstance(value, Value):
+        return _as_php_string(value.py)
     if isinstance(value, bytes):
         return value.decode("latin-1")
     if value is True:
         return "1"
     if value is False or value is None:
         return ""
+    if isinstance(value, (list, tuple, dict)):
+        return "Array"
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
