@@ -1354,6 +1354,41 @@ def _as_php_string(value: Any) -> str:
     return str(value)
 
 
+def _php_string_from_value(val: Value) -> str | None:
+    """One Python character per PHP byte.
+
+    `bytes_to_text` prefers UTF-8, which turns `C3 A9` into one character.
+    PHP `substr`, `ord`, and `strrev` count those as two bytes, so the fold
+    drops or shifts the payload.
+    """
+    if isinstance(val.py, str):
+        return val.py
+    if isinstance(val.py, bytes):
+        return val.py.decode("latin-1")
+    return None
+
+
+def _eval_source_from_value(val: Value) -> str | None:
+    """Text to splice for `eval` / `assert`.
+
+    A decoded byte string stays bytes through `substr`. When those bytes are
+    UTF-8 PHP source, splice the Unicode text so `echo "café"` is not written
+    `cafÃ©`. A string that is already text is left as written.
+    """
+    if isinstance(val.py, bytes):
+        raw = val.py
+        try:
+            utf8 = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1")
+        if utf8 != raw.decode("latin-1") and looks_like_php_source(utf8):
+            return utf8
+        return raw.decode("latin-1")
+    if isinstance(val.py, str):
+        return val.py
+    return None
+
+
 def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -1425,11 +1460,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return None
 
     def as_str(val: Value) -> str | None:
-        if isinstance(val.py, str):
-            return val.py
-        if isinstance(val.py, bytes):
-            return bytes_to_text(val.py) or val.py.decode("latin-1")
-        return None
+        return _php_string_from_value(val)
 
     if name in {"call_user_func", "register_shutdown_function", "register_tick_function"} and values:
         cb = as_str(values[0])
@@ -1622,12 +1653,16 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(out)
 
     if name == "substr" and len(values) >= 2 and isinstance(values[0].py, (str, bytes)) and _is_num(values[1].py):
+        raw_bytes = isinstance(values[0].py, bytes)
         s = as_str(values[0])
         if s is None:
             return None
         length = int(values[2].py) if len(values) > 2 and _is_num(values[2].py) else None
         version = env.php_version if env is not None else "8.3"
-        return Value(php_substr(s, int(values[1].py), length, php_version=version))
+        out = php_substr(s, int(values[1].py), length, php_version=version)
+        if raw_bytes and isinstance(out, str):
+            return Value(out.encode("latin-1"))
+        return Value(out)
 
     if name in {"strtolower", "mb_strtolower"} and values:
         s = as_str(values[0])
@@ -1755,7 +1790,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(out) if out is not None else None
 
     if name in {"eval", "assert"} and values:
-        s = as_str(values[0])
+        s = _eval_source_from_value(values[0])
         if s is None:
             return None
         return Value(s, splice_raw=True)
@@ -1815,11 +1850,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
 def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None) -> Value | None:
     """Apply a known decoder by name to already-evaluated arguments."""
     def as_str(val: Value) -> str | None:
-        if isinstance(val.py, str):
-            return val.py
-        if isinstance(val.py, bytes):
-            return bytes_to_text(val.py) or val.py.decode("latin-1")
-        return None
+        return _php_string_from_value(val)
 
     if name == "base64_decode" and values:
         raw = as_str(values[0])
@@ -1880,7 +1911,7 @@ def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None
         s = as_str(values[0])
         return Value(stripslashes(s)) if s is not None else None
     if name in {"eval", "assert"} and values:
-        s = as_str(values[0])
+        s = _eval_source_from_value(values[0])
         if s is None:
             return None
         return Value(s, splice_raw=True)
@@ -1983,7 +2014,7 @@ def _eval_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
     if val is None:
         return None
     if isinstance(val.py, bytes):
-        text = bytes_to_text(val.py)
+        text = _eval_source_from_value(val)
         if text is None:
             return None
         return Value(text, splice_raw=True)
@@ -1991,7 +2022,8 @@ def _eval_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         decoded = hex_payload_to_text(val.py, min_bytes=8)
         if decoded:
             return Value(decoded, splice_raw=True)
-        return Value(val.py, splice_raw=True)
+        text = _eval_source_from_value(val)
+        return Value(text, splice_raw=True) if text is not None else None
     return None
 
 
