@@ -309,3 +309,48 @@ def test_fixture_php_eval_base64():
     assert result.language == "php"
     assert "echo" in result.text
     assert "hi" in result.text
+
+
+def test_php_substr_counts_base64_bytes_not_utf8_characters():
+    # C3 A9 is one Unicode character and two PHP bytes. Skipping two bytes
+    # leaves system('id'); skipping one character leaves ystem('id');
+    src = '<?php eval(substr(base64_decode("w6lzeXN0ZW0oJ2lkJyk7"), 2));'
+    result = deobfuscate(src, language="php")
+    assert "system('id')" in result.text
+    assert "ystem" not in result.text.replace("system('id')", "")
+
+    euro = '<?php eval(substr(base64_decode("4oKsc3lzdGVtKCdpZCcpOw=="), 3));'
+    result = deobfuscate(euro, language="php")
+    assert "system('id')" in result.text
+    assert "stem" not in result.text.replace("system('id')", "")
+
+
+def test_php_ord_of_decoded_bytes_is_the_first_byte():
+    src = '<?php echo ord(base64_decode("w6k="));'
+    result = deobfuscate(src, language="php")
+    assert "195" in result.text
+    assert "233" not in result.text
+
+
+def test_php_strrev_reverses_decoded_bytes():
+    src = '<?php echo strrev(base64_decode("w6lBQg=="));'
+    result = deobfuscate(src, language="php")
+    assert "BAé" not in result.text
+    assert "BA" in result.text
+
+
+def test_php_utf8_eval_payload_stays_readable():
+    payload = 'echo "café";'
+    blob = base64.b64encode(payload.encode()).decode()
+    direct = deobfuscate(f'<?php eval(base64_decode("{blob}"));', language="php")
+    assert 'echo "café"' in direct.text or "echo 'café'" in direct.text
+    assert "cafÃ©" not in direct.text
+
+    prefixed = b"XX" + payload.encode()
+    blob = base64.b64encode(prefixed).decode()
+    skipped = deobfuscate(
+        f'<?php eval(substr(base64_decode("{blob}"), 2));',
+        language="php",
+    )
+    assert 'echo "café"' in skipped.text or "echo 'café'" in skipped.text
+    assert "cafÃ©" not in skipped.text
