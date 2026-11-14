@@ -54,6 +54,25 @@ def test_php_chr_and_strtr():
     assert "zbc" in result.text
 
 
+def test_php_strtr_array_does_not_retranslate():
+    # PHP manual: longest key wins, and the inserted text is not searched again.
+    src = (
+        '<?php echo strtr("hi all, I said hello", '
+        'array("h" => "-", "hello" => "hi", "hi" => "hello"));'
+    )
+    result = deobfuscate(src, language="php")
+    assert "hello all, I said hi" in result.text
+    assert "-ello" not in result.text
+
+
+def test_php_strtr_swap_keeps_executed_command():
+    # One-pass e<->s on "eyetsm" is system. Translating the inserted letters again is eyetem.
+    src = "<?php eval(strtr('eyetsm(\\'id\\');', array('e'=>'s','s'=>'e')));"
+    result = deobfuscate(src, language="php")
+    assert "system('id')" in result.text
+    assert "eyetem" not in result.text
+
+
 def test_layers_include_original_and_inner():
     inner = "echo 1;"
     b64 = base64.b64encode(inner.encode()).decode()

@@ -13,6 +13,7 @@ from evilbox.decode import (
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
+    php_strtr_map,
     php_substr,
     raw_inflate,
     stripslashes,
@@ -41,6 +42,23 @@ def test_php_bitwise_not_rejects_non_bytes():
         php_string_bytes("日本語")
     with pytest.raises(ValueError):
         xor_strings("A", "Ω")
+
+
+def test_php_strtr_map_is_one_pass():
+    assert (
+        php_strtr_map(
+            "hi all, I said hello",
+            [("h", "-"), ("hello", "hi"), ("hi", "hello")],
+        )
+        == "hello all, I said hi"
+    )
+    assert php_strtr_map("eyetsm('id');", [("e", "s"), ("s", "e")]) == "system('id');"
+    assert php_strtr_map("ab", [("a", "b"), ("b", "c")]) == "bc"
+    assert php_strtr_map("ab", [("a", "X"), ("ab", "Y")]) == "Y"
+    assert php_strtr_map("aaa", [("aa", "b")]) == "ba"
+    assert php_strtr_map("abc", [("", "X"), ("a", "b")]) == "bbc"
+    assert php_strtr_map("ab", [("a", "X"), ("a", "Z")]) == "Zb"
+    assert php_strtr_map("ab", [("", "X")]) == "ab"
 
 
 def test_php_substr_version_oob():
