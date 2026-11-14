@@ -22,6 +22,7 @@ from evilbox.decode import (
     php_str_pad,
     php_strtolower,
     php_strtoupper,
+    php_strtr_map,
     php_substr,
     php_urldecode,
     quoted_printable_decode,
@@ -1546,16 +1547,14 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             mapping = values[1].py
             if isinstance(mapping, list):
                 return None
-            out = hay
-            items = list(mapping.items())
-            items.sort(key=lambda kv: -len(str(kv[0])))
-            for key, item in items:
+            pairs: list[tuple[str, str]] = []
+            for key, item in mapping.items():
                 src = key if isinstance(key, str) else _as_php_string(key)
                 dst = as_str(item if isinstance(item, Value) else Value(item))
                 if dst is None:
                     return None
-                out = out.replace(src, dst)
-            return Value(out)
+                pairs.append((src, dst))
+            return Value(php_strtr_map(hay, pairs))
         if len(values) >= 3:
             frm = as_str(values[1])
             to = as_str(values[2])

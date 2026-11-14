@@ -690,6 +690,43 @@ def rc4_crypt(data: bytes, key: bytes) -> bytes | None:
     return bytes(out)
 
 
+def php_strtr_map(text: str, pairs: list[tuple[str, str]]) -> str:
+    """PHP `strtr($text, array $pairs)`.
+
+    The longest key at each byte wins. Text written by a replacement is not
+    searched again, and an empty key is ignored. A later pair with the same
+    key replaces the earlier one, matching PHP array assignment.
+    """
+    folded: dict[str, str] = {}
+    for src, dst in pairs:
+        if src:
+            folded[src] = dst
+    if not folded:
+        return text
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for src, dst in folded.items():
+        grouped.setdefault(src[0], []).append((src, dst))
+    for group in grouped.values():
+        group.sort(key=lambda item: len(item[0]), reverse=True)
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        match: tuple[str, str] | None = None
+        for src, dst in grouped.get(text[i], ()):
+            if text.startswith(src, i):
+                match = (src, dst)
+                break
+        if match is None:
+            out.append(text[i])
+            i += 1
+            continue
+        src, dst = match
+        out.append(dst)
+        i += len(src)
+    return "".join(out)
+
+
 def php_strtoupper(text: str) -> str:
     return "".join(chr(ord(ch) - 32) if "a" <= ch <= "z" else ch for ch in text)
 
