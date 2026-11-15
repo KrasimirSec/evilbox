@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -1252,7 +1253,10 @@ def _eval_unary(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if isinstance(val.py, bytes):
             return Value(bytes((~b) & 0xFF for b in val.py))
         if _is_num(val.py):
-            return Value(~int(val.py))
+            n = _finite_int(val.py)
+            if n is None:
+                return None
+            return Value(~n)
     return None
 
 
@@ -1304,9 +1308,16 @@ def _eval_binary(node, source: str, env: FoldEnv | None = None) -> Value | None:
         except ValueError:
             return None
     if op == "^" and _is_num(lv.py) and _is_num(rv.py):
-        return Value(int(lv.py) ^ int(rv.py))
+        a = _finite_int(lv.py)
+        b = _finite_int(rv.py)
+        if a is None or b is None:
+            return None
+        return Value(a ^ b)
     if op in {"&", "|", "<<", ">>"} and _is_num(lv.py) and _is_num(rv.py):
-        a, b = int(lv.py), int(rv.py)
+        a = _finite_int(lv.py)
+        b = _finite_int(rv.py)
+        if a is None or b is None:
+            return None
         if op == "&":
             return Value(a & b)
         if op == "|":
@@ -1356,6 +1367,21 @@ def _as_php_string(value: Any) -> str:
 
 def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _finite_int(value: Any) -> int | None:
+    """Truncate a finite number the way PHP casts to int.
+
+    `int(float('inf'))` raises OverflowError and aborts the whole decode.
+    Non-finite values are left unfolded instead.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return math.trunc(value)
+    return value
 
 
 def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
@@ -1568,8 +1594,8 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = as_str(values[0])
         if s is None or not _is_num(values[1].py):
             return None
-        n = int(values[1].py)
-        if n < 0 or n > 1_000_000 or len(s) * n > 2_000_000:
+        n = _finite_int(values[1].py)
+        if n is None or n < 0 or n > 1_000_000 or len(s) * n > 2_000_000:
             return None
         return Value(s * n)
 
@@ -1625,9 +1651,16 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         s = as_str(values[0])
         if s is None:
             return None
-        length = int(values[2].py) if len(values) > 2 and _is_num(values[2].py) else None
+        start = _finite_int(values[1].py)
+        if start is None:
+            return None
+        length = None
+        if len(values) > 2 and _is_num(values[2].py):
+            length = _finite_int(values[2].py)
+            if length is None:
+                return None
         version = env.php_version if env is not None else "8.3"
-        return Value(php_substr(s, int(values[1].py), length, php_version=version))
+        return Value(php_substr(s, start, length, php_version=version))
 
     if name in {"strtolower", "mb_strtolower"} and values:
         s = as_str(values[0])
@@ -1730,8 +1763,15 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         if s is None:
             return None
         pad = as_str(values[2]) if len(values) > 2 else " "
-        style = int(values[3].py) if len(values) > 3 and _is_num(values[3].py) else 1
-        out = php_str_pad(s, int(values[1].py), pad or " ", style)
+        width = _finite_int(values[1].py)
+        if width is None:
+            return None
+        style = 1
+        if len(values) > 3 and _is_num(values[3].py):
+            style = _finite_int(values[3].py)
+            if style is None:
+                return None
+        out = php_str_pad(s, width, pad or " ", style)
         return Value(out) if out is not None else None
 
     if name == "bin2hex" and values:
@@ -1931,7 +1971,9 @@ def _eval_subscript(node, source: str, env: FoldEnv | None) -> Value | None:
         return item if isinstance(item, Value) or item is None else Value(item)
     if not _is_num(idx_val.py):
         return None
-    idx = int(idx_val.py)
+    idx = _finite_int(idx_val.py)
+    if idx is None:
+        return None
     if reached is not None and isinstance(reached.py, str):
         if 0 <= idx < len(reached.py):
             return Value(reached.py[idx])

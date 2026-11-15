@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import time
 
 import pytest
@@ -107,6 +108,32 @@ echo '<input type="password" name="pwd" />';
     cls = classify_layers([("original", src)], language="php")
     assert "stealer" not in {r.name for r in cls.roles}
     assert "dropper" not in {r.name for r in cls.roles}
+
+
+def test_php_nonfinite_int_cast_does_not_abort_decode():
+    """INF must not be passed to int() while a later payload is still packed.
+
+    `1 << 1e309`, `~1e309`, and string helpers that cast their numeric
+    arguments used to raise OverflowError inside constant folding, so the
+    eval() below never ran.
+    """
+    payload = "echo 'live';"
+    blob = base64.b64encode(payload.encode()).decode()
+    sources = [
+        f"<?php $n = 1 << 1e309; eval(base64_decode('{blob}'));",
+        f"<?php $n = 1 & 1e309; eval(base64_decode('{blob}'));",
+        f"<?php $n = ~1e309; eval(base64_decode('{blob}'));",
+        f"<?php $n = substr('abc', 1e309); eval(base64_decode('{blob}'));",
+        f"<?php $n = str_repeat('a', 1e309); eval(base64_decode('{blob}'));",
+        f"<?php $n = str_pad('a', 1e309); eval(base64_decode('{blob}'));",
+        f"<?php $s = 'ab'; $n = $s[1e309]; eval(base64_decode('{blob}'));",
+    ]
+    for src in sources:
+        result = deobfuscate(src, language="php")
+        assert "live" in result.text
+        assert "base64_decode" not in result.text
+    finite = deobfuscate("<?php echo 1 << 3;", language="php")
+    assert "8" in finite.text
 
 
 def test_eval_dumps_are_separate_layers():
