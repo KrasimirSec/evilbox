@@ -1056,15 +1056,192 @@ def unwrap_halt_compiler(source: str) -> tuple[str, list[str]]:
 
 
 def unwrap_layout(source: str) -> tuple[str, list[str]]:
+    """Collapse padding whitespace, but never inside a string, template, or heredoc.
+
+    A file padded with blank lines used to rewrite every long run, including
+    payload text. A template or PHP string that still had its newlines then
+    failed a later comparison and the live branch was dropped.
+    """
     notes: list[str] = []
     text = source
-    if re.search(r"\n{12,}", text):
-        text = re.sub(r"\n{3,}", "\n\n", text)
+    masked = _mask_layout_literals(text)
+    if re.search(r"\n{12,}", masked):
+        text = _sub_unmasked(text, masked, r"\n{3,}", "\n\n")
         notes.append("Collapsed excessive blank lines.")
-    if re.search(r"[^\S\n]{120,}", text):
-        text = re.sub(r"[^\S\n]{120,}", " ", text)
+    masked = _mask_layout_literals(text)
+    if re.search(r"[^\S\n]{120,}", masked):
+        text = _sub_unmasked(text, masked, r"[^\S\n]{120,}", " ")
         notes.append("Collapsed huge whitespace runs.")
     return text, notes
+
+
+def _sub_unmasked(source: str, masked: str, pattern: str, repl: str) -> str:
+    spans = [match.span() for match in re.finditer(pattern, masked)]
+    for start, end in reversed(spans):
+        source = source[:start] + repl + source[end:]
+    return source
+
+
+def _mask_layout_literals(source: str) -> str:
+    """Same length as `source`, with whitespace inside literals replaced by `x`."""
+    chars = list(source)
+    n = len(chars)
+    i = 0
+    while i < n:
+        ch = chars[i]
+        if ch == "/" and i + 1 < n and chars[i + 1] == "/":
+            i += 2
+            while i < n and chars[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and chars[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if ch == "#" and not _hash_is_private_name(chars, i):
+            i += 1
+            while i < n and chars[i] not in "\r\n":
+                i += 1
+            continue
+        if source.startswith("<<<", i):
+            end = _layout_heredoc_end(source, i)
+            if end is not None:
+                _blank_layout_ws(chars, i, end)
+                i = end
+                continue
+        if ch in "'\"":
+            end = _layout_quoted_end(source, i)
+            _blank_layout_ws(chars, i, end)
+            i = end
+            continue
+        if ch == "`":
+            end = _layout_template_end(source, i)
+            _blank_layout_ws(chars, i, end)
+            i = end
+            continue
+        i += 1
+    return "".join(chars)
+
+
+def _blank_layout_ws(chars: list[str], start: int, end: int) -> None:
+    for index in range(start, min(end, len(chars))):
+        if chars[index].isspace():
+            chars[index] = "x"
+
+
+def _hash_is_private_name(chars: list[str], index: int) -> bool:
+    """JavaScript `#name` is an identifier, not a PHP line comment."""
+    prev = index - 1
+    while prev >= 0 and chars[prev] in " \t":
+        prev -= 1
+    if prev < 0:
+        return False
+    return chars[prev].isalnum() or chars[prev] in "._$"
+
+
+def _layout_quoted_end(source: str, index: int) -> int:
+    quote = source[index]
+    i = index + 1
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _layout_template_end(source: str, index: int) -> int:
+    i = index + 1
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            return i + 1
+        if ch == "$" and i + 1 < n and source[i + 1] == "{":
+            i = _layout_brace_end(source, i + 1)
+            continue
+        i += 1
+    return n
+
+
+def _layout_brace_end(source: str, index: int) -> int:
+    """`index` points at `{`. Return the index just after the matching `}`."""
+    depth = 0
+    i = index
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            i += 1
+            if depth == 0:
+                return i
+            continue
+        if ch in "'\"":
+            i = _layout_quoted_end(source, i)
+            continue
+        if ch == "`":
+            i = _layout_template_end(source, i)
+            continue
+        if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            i += 2
+            while i < n and source[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and source[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        i += 1
+    return n
+
+
+def _layout_heredoc_end(source: str, index: int) -> int | None:
+    if not source.startswith("<<<", index):
+        return None
+    j = index + 3
+    quote = ""
+    if j < len(source) and source[j] in "'\"":
+        quote = source[j]
+        j += 1
+    if j >= len(source) or not (source[j].isascii() and (source[j].isalpha() or source[j] == "_")):
+        return None
+    k = j + 1
+    while k < len(source) and source[k].isascii() and (source[k].isalnum() or source[k] == "_"):
+        k += 1
+    label = source[j:k]
+    if quote:
+        if k >= len(source) or source[k] != quote:
+            return None
+        k += 1
+    if k < len(source) and source[k] == "\r":
+        k += 1
+    if k >= len(source) or source[k] != "\n":
+        return None
+    line = k + 1
+    n = len(source)
+    while line <= n:
+        end = source.find("\n", line)
+        if end == -1:
+            end = n
+        stripped = source[line:end].strip()
+        if stripped == label or stripped == label + ";":
+            return end + 1 if end < n else n
+        if end == n:
+            return n
+        line = end + 1
+    return n
 
 
 def unwrap_aaencode(source: str) -> tuple[str, list[str]]:
