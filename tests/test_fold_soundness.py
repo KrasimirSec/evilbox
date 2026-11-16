@@ -73,6 +73,51 @@ def test_huge_shift_does_not_raise():
     assert "<<" in result.text
 
 
+def test_layout_collapse_does_not_drop_template_branch():
+    """Padding newlines must not rewrite a template that is compared to a payload."""
+    pad = "\n" * 12
+    src = "if (`a\n\n\nb` === \"a\\n\\n\\nb\") live(); else decoy();" + pad
+    result = deobfuscate(src, language="js")
+    assert "live()" in result.text
+    assert "decoy()" not in result.text
+
+
+def test_layout_collapse_does_not_drop_spaced_template_branch():
+    spaces = " " * 120
+    src = "if (`" + spaces + "` === \"" + ("\\x20" * 120) + "\") live(); else decoy();" + spaces
+    result = deobfuscate(src, language="js")
+    assert "live()" in result.text
+    assert "decoy()" not in result.text
+
+
+def test_layout_collapse_keeps_php_string_newlines():
+    pad = "\n" * 12
+    src = '<?php\n$s = "a\n\n\nb";\necho $s;\n' + pad
+    result = deobfuscate(src, language="php")
+    assert "a\\n\\n\\nb" in result.text or "a\n\n\nb" in result.text
+
+
+def test_layout_collapse_keeps_php_heredoc():
+    from evilbox.unwrap import unwrap_layout
+
+    pad = "\n" * 12
+    src = "<?php\n$s = <<<TXT\na\n\n\nb\nTXT;\necho $s;\n" + pad
+    text, notes = unwrap_layout(src)
+    assert "Collapsed excessive blank lines." in notes
+    assert "a\n\n\nb" in text
+
+
+def test_layout_still_collapses_blank_lines_outside_strings():
+    from evilbox.unwrap import unwrap_layout
+
+    src = "function a(){return 1;}\n" + ("\n" * 12) + "function b(){return 2;}\n"
+    text, notes = unwrap_layout(src)
+    assert notes == ["Collapsed excessive blank lines."]
+    assert "\n\n\n" not in text
+    assert "function a(){return 1;}" in text
+    assert "function b(){return 2;}" in text
+
+
 def test_batch_isolates_failures_and_unique_names(tmp_path):
     root = tmp_path / "samples"
     (root / "a").mkdir(parents=True)
