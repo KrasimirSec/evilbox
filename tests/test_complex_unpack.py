@@ -139,6 +139,43 @@ def test_php_str_replace_and_implode():
     assert "hi" in result.text
 
 
+def test_php_implode_casts_scalar_separator():
+    """A numeric separator is part of the command. Dropping it runs different code."""
+    src = """<?php eval(implode(0, array("system('", "id')")));"""
+    result = deobfuscate(src, language="php")
+    assert "system('0id')" in result.text
+    assert "system('id')" not in result.text
+
+    echoed = deobfuscate(
+        "<?php echo implode(1, array('a', 'b')), implode(1.0, array('a', 'b')), "
+        "implode(1.5, array('a', 'b')), implode(true, array('a', 'b')), "
+        "implode(false, array('a', 'b')), implode('0', array('a', 'b')), "
+        "implode(-2, array('a', 'b'));",
+        language="php",
+    )
+    text = echoed.text
+    assert text.count("'a1b'") == 3
+    assert "'a1.5b'" in text
+    assert "'ab'" in text
+    assert "'a0b'" in text
+    assert "'a-2b'" in text
+
+
+def test_php8_implode_does_not_swap_argument_order():
+    src = "<?php echo implode(array('a', 'b'), '-');"
+    php8 = deobfuscate(src, language="php", php_version="8.3")
+    assert "implode" in php8.text
+    assert "'a-b'" not in php8.text
+    php7 = deobfuscate(src, language="php", php_version="7.4")
+    assert "'a-b'" in php7.text
+    numeric = deobfuscate(
+        "<?php echo implode(array('a', 'b'), 0);",
+        language="php",
+        php_version="7.4",
+    )
+    assert "'a0b'" in numeric.text
+
+
 def test_php_sprintf_substr():
     src = "<?php $x = sprintf('%s%s', 'ab', 'cd'); $y = substr('hello', 1, 3);"
     result = deobfuscate(src, language="php")
