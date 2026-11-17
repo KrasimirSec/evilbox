@@ -15,6 +15,7 @@ from evilbox.decode import (
     hex_decode,
     hex_payload_to_text,
     looks_like_php_source,
+    parse_php_version,
     parse_quoted_string,
     php_bitwise_not,
     php_quote,
@@ -1358,6 +1359,24 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _implode_separator(val: Value) -> str | None:
+    """PHP casts a scalar implode/join separator with `(string)`.
+
+    Arrays and other non-scalars are left unfolded: PHP 8 raises, and a list's
+    Python repr is not the string `Array`.
+    """
+    py = val.py
+    if isinstance(py, str):
+        return py
+    if isinstance(py, bytes):
+        return bytes_to_text(py) or py.decode("latin-1")
+    if isinstance(py, float) and (py != py or py in (float("inf"), float("-inf"))):
+        return None
+    if py is True or py is False or py is None or _is_num(py):
+        return _as_php_string(py)
+    return None
+
+
 def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
     fn = node.child_by_field_name("function")
     if fn is None and node.named_children:
@@ -1637,15 +1656,28 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
         return Value(php_strtoupper(s)) if s is not None else None
 
     if name in {"implode", "join"} and values:
+        # PHP accepts one array, or a separator then an array. PHP 8 rejects the
+        # legacy pieces-then-separator order; that call throws and must not fold.
+        if len(values) > 2:
+            return None
+        major, _minor = parse_php_version(env.php_version if env is not None else "8.3")
         glue = ""
         pieces: list[Any] | None = None
         first = values[0].py
         if isinstance(first, list):
-            pieces = first
-            if len(values) > 1:
-                glue = as_str(values[1]) or ""
-        elif len(values) >= 2 and isinstance(values[1].py, list):
-            glue = as_str(values[0]) or ""
+            if len(values) == 1:
+                pieces = first
+            elif major < 8:
+                separator = _implode_separator(values[1])
+                if separator is None:
+                    return None
+                glue = separator
+                pieces = first
+        elif len(values) == 2 and isinstance(values[1].py, list):
+            separator = _implode_separator(values[0])
+            if separator is None:
+                return None
+            glue = separator
             pieces = values[1].py
         if pieces is None:
             return None
