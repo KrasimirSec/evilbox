@@ -32,6 +32,36 @@ def test_js_hex_string_unescape():
     assert "Hi" in result.text
 
 
+def test_js_octal_space_does_not_drop_decoded_payload():
+    """`\\040` is a space. Treating it as NUL made the whole pass unparseable."""
+    inner = "console.log('live');"
+    b64 = base64.b64encode(inner.encode()).decode()
+    src = 'var pad = "\\040";\n' + f'eval(atob("{b64}"));'
+    result = deobfuscate(src, language="js")
+    assert "console.log" in result.text
+    assert "live" in result.text
+    assert "atob" not in result.text
+    assert "\\040" not in result.text
+    assert "\x00" not in result.text
+
+
+def test_js_three_digit_octal_above_0377_keeps_live_branch():
+    """`\\400` is a space plus `0` in JavaScript, not U+0100."""
+    src = 'if ("\\400" === " 0") { live(); } else { decoy(); }'
+    result = deobfuscate(src, language="js")
+    assert "live" in result.text
+    assert "decoy" not in result.text
+
+
+def test_php_octal_space_eval_is_the_php_string():
+    """`\\040` is a space, so the eval runs `echo hi;` rather than a NUL splice."""
+    src = '<?php eval("\\145\\143\\150\\157\\040\\150\\151\\073");'
+    result = deobfuscate(src, language="php")
+    assert "echo hi;" in result.text
+    assert "eval" not in result.text
+    assert "\x00" not in result.text
+
+
 def test_js_array_lookup_concat():
     src = 'var a = ["en"]; var b = [39, "op"]; var x = b[1] + a[0];'
     result = deobfuscate(src, language="js")

@@ -283,7 +283,14 @@ def bytes_to_text(data: bytes) -> str | None:
     return None
 
 
-def unescape_js_string_body(body: str) -> str:
+def unescape_js_string_body(body: str, *, php: bool = False) -> str:
+    """Decode ``\\x``, ``\\u``, and octal escapes in a quoted string body.
+
+    A leading zero is an octal digit, not a one-byte NUL. JavaScript legacy
+    octal takes three digits when the first is 0-3 and two otherwise, so
+    ``\\400`` is a space plus ``0``. PHP takes up to three digits and keeps
+    the low byte, so ``\\400`` is NUL.
+    """
     out: list[str] = []
     i = 0
     while i < len(body):
@@ -300,7 +307,6 @@ def unescape_js_string_body(body: str) -> str:
             "b": "\b",
             "f": "\f",
             "v": "\v",
-            "0": "\0",
             "\\": "\\",
             "'": "'",
             '"': '"',
@@ -332,10 +338,20 @@ def unescape_js_string_body(body: str) -> str:
                     i += 6
                     continue
         if nxt in "01234567":
+            # JS Annex B: 0-3 may start a 3-digit escape; 4-7 stop at two.
+            # PHP always reads up to three digits and masks to a byte.
+            if php or nxt in "0123":
+                max_digits = 3
+            else:
+                max_digits = 2
             j = i + 1
-            while j < len(body) and j < i + 4 and body[j] in "01234567":
+            limit = i + 1 + max_digits
+            while j < len(body) and j < limit and body[j] in "01234567":
                 j += 1
-            out.append(chr(int(body[i + 1 : j], 8)))
+            value = int(body[i + 1 : j], 8)
+            if php:
+                value &= 0xFF
+            out.append(chr(value))
             i = j
             continue
         out.append(nxt)
@@ -352,7 +368,7 @@ def parse_quoted_string(literal: str) -> str | None:
     body = literal[1:-1]
     if quote == "'":
         return body.replace("\\'", "'").replace("\\\\", "\\")
-    return unescape_js_string_body(body)
+    return unescape_js_string_body(body, php=True)
 
 
 def unescape_html_entities(text: str) -> str:

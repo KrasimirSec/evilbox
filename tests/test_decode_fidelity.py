@@ -16,6 +16,7 @@ from evilbox.decode import (
     php_substr,
     raw_inflate,
     stripslashes,
+    unescape_js_string_body,
     uudecode_ex,
     xor_strings,
 )
@@ -24,6 +25,21 @@ from evilbox.phpdiff import php_binary, php_eval_json
 
 def _php_quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def test_octal_escapes_match_js_and_php():
+    assert unescape_js_string_body(r"\040") == " "
+    assert unescape_js_string_body(r"\012") == "\n"
+    assert unescape_js_string_body(r"\000") == "\0"
+    assert unescape_js_string_body(r"\101") == "A"
+    assert unescape_js_string_body(r"\400") == " 0"
+    assert unescape_js_string_body(r"\777") == "?7"
+    assert unescape_js_string_body(r"\377") == "\xff"
+    assert unescape_js_string_body(r"\0a") == "\0a"
+    assert unescape_js_string_body(r"\040", php=True) == " "
+    assert unescape_js_string_body(r"\400", php=True) == "\0"
+    assert unescape_js_string_body(r"\777", php=True) == "\xff"
+    assert unescape_js_string_body(r"\4000", php=True) == "\x000"
 
 
 def test_stripslashes_nul_and_trailing_backslash():
@@ -99,6 +115,10 @@ def test_php_differential_property_folds():
             php_val = php_eval_json(f"substr({args})")
             ours = php_substr(sample, start, length, php_version=version)
             assert php_val == ours
+
+    for literal in (r"\040", r"\012", r"\000", r"\101", r"\400", r"\777", r"\4000", r"\08"):
+        php_val = php_eval_json('"' + literal + '"')
+        assert php_val == unescape_js_string_body(literal, php=True)
 
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
