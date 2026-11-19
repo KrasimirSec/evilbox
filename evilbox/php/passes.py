@@ -6,7 +6,7 @@ from typing import Any
 
 from evilbox.decode import (
     PHP_TRIM_DEFAULT,
-    b64decode,
+    php_b64decode,
     bytes_to_text,
     bzip_bytes,
     expand_php_charlist,
@@ -755,8 +755,7 @@ def _apply_known_decoder(name: str | None, data: bytes) -> bytes | None:
     if key in {"bzdecompress", "bzinflate"}:
         return bzip_bytes(data)
     if key == "base64_decode":
-        text = data.decode("latin-1")
-        return b64decode(text)
+        return php_b64decode(data.decode("latin-1"))
     if key in {"hex2bin", "hex2ascii", "hextobin", "unhex"}:
         return hex_decode(data.decode("latin-1"))
     return None
@@ -1358,6 +1357,40 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _php_truthy(value: Any) -> bool:
+    """PHP boolean cast. ``"0"`` is false; ``"00"`` and ``"0.0"`` are true."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value != "" and value != "0"
+    if isinstance(value, bytes):
+        return value != b"" and value != b"0"
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return True
+
+
+def _eval_base64(values: list[Value]) -> Value | None:
+    raw = values[0].py
+    if isinstance(raw, bytes):
+        text = raw.decode("latin-1")
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        return None
+    strict = len(values) > 1 and _php_truthy(values[1].py)
+    data = php_b64decode(text, strict=strict)
+    if data is None:
+        return Value(False) if strict else None
+    return Value(data)
+
+
 def _call_name(node, source: str, env: FoldEnv | None = None) -> str | None:
     fn = node.child_by_field_name("function")
     if fn is None and node.named_children:
@@ -1451,11 +1484,7 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
             values = values[1:]
 
     if name == "base64_decode" and values:
-        raw = as_str(values[0])
-        if raw is None:
-            return None
-        data = b64decode(raw)
-        return Value(data) if data is not None else None
+        return _eval_base64(values)
 
     if name == "gzinflate" and values:
         data = as_bytes(values[0])
@@ -1822,11 +1851,7 @@ def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None
         return None
 
     if name == "base64_decode" and values:
-        raw = as_str(values[0])
-        if raw is None:
-            return None
-        data = b64decode(raw)
-        return Value(data) if data is not None else None
+        return _eval_base64(values)
     if name == "str_rot13" and values:
         s = as_str(values[0])
         return Value(rot13(s)) if s is not None else None

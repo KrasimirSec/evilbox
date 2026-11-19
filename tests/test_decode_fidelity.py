@@ -9,6 +9,7 @@ from evilbox.decode import (
     MAX_CODEC_OUTPUT,
     expand_php_charlist,
     gzip_bytes,
+    php_b64decode,
     php_bitwise_not,
     php_str_pad,
     php_string_bytes,
@@ -24,6 +25,36 @@ from evilbox.phpdiff import php_binary, php_eval_json
 
 def _php_quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def test_php_base64_uses_the_standard_alphabet():
+    """'_' and '-' are ignored, not read as '/' and '+'."""
+    assert php_b64decode("_ZWNobyAnaGknOw") == b"echo 'hi';"
+    assert php_b64decode("ZWNo-byAnaGknOw") == b"echo 'hi';"
+    assert php_b64decode("ZWNobyAnaGknOw") == b"echo 'hi';"
+    # '=' is not a digit. The two chunks are one bit stream, not two payloads.
+    assert php_b64decode("YQ==YQ==") == php_b64decode("YQYQ")
+    assert php_b64decode("ZWNobyAnaGknOw!!!", strict=True) is None
+    assert php_b64decode("ZWNobyAnaGknOw", strict=True) == b"echo 'hi';"
+    assert php_b64decode("YQ", strict=True) == b"a"
+    assert php_b64decode("YQ=", strict=True) is None
+
+
+@pytest.mark.skipif(php_binary() is None, reason="php CLI not installed")
+def test_php_base64_matches_interpreter():
+    rng = random.Random(2026)
+    for strict in (False, True):
+        for _ in range(30):
+            raw = bytes(rng.randrange(256) for _ in range(rng.randint(0, 24))).decode("latin-1")
+            chars = ",".join(str(ord(ch)) for ch in raw)
+            flag = ", true" if strict else ""
+            expr = f"base64_decode(pack('C*', {chars}){flag})" if chars else f"base64_decode(''{flag})"
+            php_val = php_eval_json(expr)
+            ours = php_b64decode(raw, strict=strict)
+            if ours is None:
+                assert php_val is False
+            else:
+                assert php_val == ours.decode("latin-1")
 
 
 def test_stripslashes_nul_and_trailing_backslash():
