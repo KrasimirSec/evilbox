@@ -52,6 +52,21 @@ def test_js_rename_junk():
     assert "v0" in result.text
 
 
+def test_php_base64_ignores_urlsafe_digits_and_strict_failures():
+    loose = deobfuscate("<?php eval(base64_decode('_ZWNobyAnaGknOw'));", language="php")
+    assert "echo 'hi';" in loose.text
+    assert loose.parse_ok
+    dashed = deobfuscate("<?php eval(base64_decode('ZWNo-byAnaGknOw'));", language="php")
+    assert "echo 'hi';" in dashed.text
+    strict = deobfuscate(
+        "<?php eval(base64_decode('ZWNobyAnaGknOw!!!', true)); echo 'after';",
+        language="php",
+    )
+    assert "echo 'hi'" not in strict.text
+    assert "eval(false)" in strict.text.replace(" ", "")
+    assert "after" in strict.text
+
+
 def test_php_eval_base64():
     inner = 'echo "hi";'
     b64 = base64.b64encode(inner.encode()).decode()

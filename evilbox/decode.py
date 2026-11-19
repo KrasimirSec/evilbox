@@ -33,6 +33,58 @@ def b64decode(text: str) -> bytes | None:
     return None
 
 
+# PHP's base64 alphabet. '=' is padding, not a data digit, and '-' / '_' are
+# not aliases for '+' / '/'.
+_PHP_B64_DIGITS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+_PHP_B64_SPACE = frozenset(" \t\n\r")
+
+
+def php_b64decode(text: str, *, strict: bool = False) -> bytes | None:
+    """PHP ``base64_decode``.
+
+    Non-strict mode ignores every byte outside the standard alphabet, including
+    ``=``, ``-``, and ``_``, then decodes the remaining digits. A final lone
+    digit is discarded. Strict mode returns None where PHP returns false:
+    a byte outside the alphabet (whitespace is still ignored), padding that is
+    not a correct suffix, or a single trailing digit.
+    """
+    if strict:
+        digits: list[str] = []
+        pads = 0
+        saw_pad = False
+        for ch in text:
+            if ch in _PHP_B64_SPACE:
+                continue
+            if ch == "=":
+                saw_pad = True
+                pads += 1
+                if pads > 2:
+                    return None
+                continue
+            if saw_pad or ch not in _PHP_B64_DIGITS:
+                return None
+            digits.append(ch)
+        length = len(digits)
+        if pads == 1 and length % 4 != 3:
+            return None
+        if pads == 2 and length % 4 != 2:
+            return None
+        if pads == 0 and length % 4 == 1:
+            return None
+        body = "".join(digits)
+    else:
+        body = "".join(ch for ch in text if ch in _PHP_B64_DIGITS)
+        if len(body) % 4 == 1:
+            body = body[:-1]
+    if not body:
+        return b""
+    pad = (-len(body)) % 4
+    try:
+        return base64.b64decode(body + ("=" * pad))
+    except Exception:
+        return None
+
+
 def hex_decode(text: str) -> bytes | None:
     cleaned = text.strip()
     if re.search(r"\\x[0-9a-fA-F]{2}", cleaned, re.I):
