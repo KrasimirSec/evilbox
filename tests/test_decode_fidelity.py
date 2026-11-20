@@ -10,6 +10,7 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_sprintf,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -100,6 +101,18 @@ def test_php_differential_property_folds():
             ours = php_substr(sample, start, length, php_version=version)
             assert php_val == ours
 
+    assert php_sprintf("%04s", ["ab"]) == "00ab"
+    assert php_sprintf("%-04s", ["id"]) == "id00"
+    assert php_sprintf("%04.2s", ["abcd"]) == "00ab"
+    assert php_sprintf("%c", [256]) == "\x00"
+    assert php_sprintf("%c", [-1]) == "\xff"
+    assert php_sprintf("%c", ["a"]) == "\x00"
+    assert php_sprintf("%u", [-1]) == "18446744073709551615"
+    assert php_sprintf("%o", [-1]) == "1777777777777777777777"
+    assert php_sprintf("% d", [7]) == "7"
+    assert php_sprintf("%04d", [-7]) == "-007"
+    assert php_sprintf("%s%s", ["ab", "cd"]) == "abcd"
+    assert php_sprintf("%x", [255]) is None
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"

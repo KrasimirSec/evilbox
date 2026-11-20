@@ -732,6 +732,201 @@ def php_str_pad(text: str, width: int, pad: str = " ", style: int = 1) -> str | 
     return text + fill
 
 
+_PHP_INT_MIN = -1 << 63
+_PHP_INT_MAX = (1 << 63) - 1
+_PHP_UINT64 = (1 << 64) - 1
+_SPRINTF_MAX_WIDTH = 1_000_000
+
+
+def _php_int_cast(value: object) -> int | None:
+    """PHP integer cast used by sprintf %d/%u/%o/%c. None when it is not exact."""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        if _PHP_INT_MIN <= value <= _PHP_INT_MAX:
+            return value
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        truncated = int(value)
+        if _PHP_INT_MIN <= truncated <= _PHP_INT_MAX:
+            return truncated
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("latin-1")
+    if not isinstance(value, str):
+        return None
+    i = 0
+    n = len(value)
+    while i < n and value[i] in " \t\n\r\v\f":
+        i += 1
+    if i >= n:
+        return 0
+    sign = 1
+    if value[i] == "+":
+        i += 1
+    elif value[i] == "-":
+        sign = -1
+        i += 1
+    start = i
+    while i < n and value[i].isdigit():
+        i += 1
+    if start == i:
+        return 0
+    number = sign * int(value[start:i])
+    if _PHP_INT_MIN <= number <= _PHP_INT_MAX:
+        return number
+    return None
+
+
+def _php_sprintf_string(value: object) -> str | None:
+    if isinstance(value, bool):
+        return "1" if value else ""
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        if _PHP_INT_MIN <= value <= _PHP_INT_MAX:
+            return str(value)
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")) or not value.is_integer():
+            return None
+        return _php_sprintf_string(int(value))
+    if isinstance(value, bytes):
+        return value.decode("latin-1")
+    if isinstance(value, str):
+        if any(ord(ch) > 255 for ch in value):
+            return None
+        return value
+    return None
+
+
+def _sprintf_align(text: str, width: int | None, flags: set[str], *, zero: bool) -> str | None:
+    if width is None or width <= len(text):
+        return text
+    if width > _SPRINTF_MAX_WIDTH:
+        return None
+    pad = ("0" if zero else " ") * (width - len(text))
+    if "-" in flags:
+        return text + pad
+    return pad + text
+
+
+def _sprintf_number(value: int, flags: set[str], width: int | None, *, unsigned: bool, base: int) -> str | None:
+    if unsigned:
+        sign = ""
+        digits = format(value & _PHP_UINT64, "d" if base == 10 else "o")
+    elif value < 0:
+        sign = "-"
+        digits = str(-value)
+    elif "+" in flags:
+        sign = "+"
+        digits = str(value)
+    else:
+        sign = ""
+        digits = str(value)
+    body = sign + digits
+    if width is None or width <= len(body):
+        return body
+    if "-" in flags:
+        return _sprintf_align(body, width, flags, zero=False)
+    if "0" in flags:
+        return sign + "0" * (width - len(body)) + digits
+    return _sprintf_align(body, width, flags, zero=False)
+
+
+def php_sprintf(fmt: str, args: list[object]) -> str | None:
+    """PHP sprintf for the conversions constant folding can prove.
+
+    Python's ``%`` operator zero-pads numbers but not strings, prints ``%c``
+    as a Unicode code point, and prints negative ``%u`` / ``%o`` with a sign.
+    Those results are different bytes from PHP, so a later ``eval`` or
+    comparison follows the wrong branch. Unsupported conversions are left
+    unfolded.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(fmt)
+    argi = 0
+    while i < n:
+        if fmt[i] != "%":
+            out.append(fmt[i])
+            i += 1
+            continue
+        if i + 1 < n and fmt[i + 1] == "%":
+            out.append("%")
+            i += 2
+            continue
+        i += 1
+        flags: set[str] = set()
+        while i < n and fmt[i] in "-+0 ":
+            flags.add(fmt[i])
+            i += 1
+        width: int | None = None
+        if i < n and fmt[i].isdigit():
+            j = i
+            while j < n and fmt[j].isdigit():
+                j += 1
+            width = int(fmt[i:j])
+            if width > _SPRINTF_MAX_WIDTH:
+                return None
+            i = j
+        prec: int | None = None
+        if i < n and fmt[i] == ".":
+            i += 1
+            if i >= n or not fmt[i].isdigit():
+                return None
+            j = i
+            while j < n and fmt[j].isdigit():
+                j += 1
+            prec = int(fmt[i:j])
+            i = j
+        if i >= n or fmt[i] not in "sduoc":
+            return None
+        kind = fmt[i]
+        i += 1
+        if argi >= len(args):
+            return None
+        arg = args[argi]
+        argi += 1
+        # PHP 8 ignores a precision on %d/%u. A precision on %o does not follow
+        # that rule (%.2o can be empty), so leave those formats unfolded.
+        if kind == "o" and prec is not None:
+            return None
+        if kind == "s":
+            text = _php_sprintf_string(arg)
+            if text is None:
+                return None
+            if prec is not None:
+                text = text[:prec]
+            piece = _sprintf_align(text, width, flags, zero="0" in flags)
+        elif kind == "c":
+            number = _php_int_cast(arg)
+            if number is None:
+                return None
+            piece = chr(number & 0xFF)
+        elif kind in {"d", "u", "o"}:
+            number = _php_int_cast(arg)
+            if number is None:
+                return None
+            piece = _sprintf_number(
+                number,
+                flags,
+                width,
+                unsigned=kind != "d",
+                base=8 if kind == "o" else 10,
+            )
+        else:
+            return None
+        if piece is None:
+            return None
+        out.append(piece)
+    return "".join(out)
+
+
 def format_php_number(value: float | int) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
