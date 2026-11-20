@@ -146,6 +146,30 @@ def test_php_sprintf_substr():
     assert "ell" in result.text
 
 
+def test_php_sprintf_zero_pad_keeps_the_matching_branch():
+    """PHP zero-pads %s. Python's formatter space-pads it, so the live compare looked false."""
+    src = "<?php if (sprintf('%04s', 'ab') === '00ab') { echo 'LIVE'; } else { echo 'DECOY'; }\n"
+    result = deobfuscate(src, language="php")
+    assert "'00ab' === '00ab'" in result.text
+    assert "'  ab'" not in result.text
+    assert "LIVE" in result.text
+
+
+def test_php_sprintf_zero_pad_is_not_spliced_as_the_unpadded_word():
+    src = "<?php eval(sprintf('%04s', 'id'));\n"
+    result = deobfuscate(src, language="php")
+    folded = "".join(result.text.split())
+    assert folded != "<?phpid;"
+    assert "00id" in folded or "sprintf" in folded
+
+
+def test_php_sprintf_char_code_is_a_byte():
+    src = "<?php echo sprintf('%c', 256);\n"
+    result = deobfuscate(src, language="php")
+    assert "\\x00" in result.text
+    assert "\u0100" not in result.text
+
+
 def test_php_bitwise_not_eval():
     payload = 'echo "k";'
     neg = bytes((~b) & 0xFF for b in payload.encode("latin-1"))

@@ -19,6 +19,7 @@ from evilbox.decode import (
     php_bitwise_not,
     php_quote,
     php_string_bytes,
+    php_sprintf,
     php_str_pad,
     php_strtolower,
     php_strtoupper,
@@ -1654,21 +1655,10 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
 
     if name == "sprintf" and values:
         fmt = as_str(values[0])
-        if fmt is None or "%$" in fmt or "*" in fmt:
+        if fmt is None:
             return None
-        if re.search(r"%[0-9$.]*[xXeEfFgGbB]", fmt):
-            return None
-        try:
-            args = []
-            for v in values[1:]:
-                if _is_num(v.py):
-                    args.append(int(v.py) if isinstance(v.py, float) and float(v.py).is_integer() else v.py)
-                else:
-                    args.append(_as_php_string(v.py))
-            # PHP %x is unsigned; keep width-free conversions that Python's % handles.
-            return Value(fmt % tuple(args))
-        except Exception:
-            return None
+        rendered = php_sprintf(fmt, [v.py for v in values[1:]])
+        return Value(rendered) if rendered is not None else None
 
     if name in {"html_entity_decode", "htmlspecialchars_decode"} and values:
         s = as_str(values[0])
