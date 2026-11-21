@@ -891,6 +891,22 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not (isinstance(value, float) and math.isnan(value))
 
 
+def _js_index(value: Any) -> int | None:
+    """Truncate a finite number toward zero the way JS ToInteger does.
+
+    NaN and non-finite values stay unfolded so a later pass does not splice a
+    truncated index or abort the decode.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _js_truthy(value: Any) -> bool:
     """JavaScript ToBoolean, including empty arrays (objects are truthy)."""
     if value is None or value is False:
@@ -1249,13 +1265,39 @@ def _eval_method(recv: Value, prop: str, values: list[Value]) -> Value | None:
         if name in {"slice", "substring", "substr"}:
             if not values or not _is_num(values[0].py):
                 return None
-            start = int(values[0].py)
-            end = int(values[1].py) if len(values) > 1 and _is_num(values[1].py) else None
+            start = _js_index(values[0].py)
+            if start is None:
+                return None
+            has_end = len(values) > 1 and _is_num(values[1].py)
+            # A present but non-numeric end is not "missing". JS would coerce it.
+            if name == "substring" and len(values) > 1 and not has_end:
+                return None
+            end = _js_index(values[1].py) if has_end else None
+            if has_end and end is None:
+                return None
             if name == "substr":
                 if start < 0:
                     start = max(len(py) + start, 0)
                 length = end
                 return Value(py[start:] if length is None else py[start : start + length])
+            if name == "substring":
+                # substring clamps negatives to 0 and swaps the ends.
+                # "url".substring(-8) is the whole string, not the last 8 chars,
+                # and substring(len, 8) is the tail, not the empty Python slice.
+                n = len(py)
+
+                def clamp(index: int) -> int:
+                    if index < 0:
+                        return 0
+                    if index > n:
+                        return n
+                    return index
+
+                left = clamp(start)
+                right = n if end is None else clamp(end)
+                if left > right:
+                    left, right = right, left
+                return Value(py[left:right])
             return Value(py[start:end])
         if name == "split":
             sep = values[0].py if values and isinstance(values[0].py, str) else None
