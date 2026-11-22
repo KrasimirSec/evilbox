@@ -23,6 +23,22 @@ var x = ("a" == "a") ? "yes" : "no";
     assert "Removed dead string-comparison branch" in result.warnings
 
 
+def test_js_html_entity_comparison_keeps_the_live_branch():
+    src = """
+if ("&#65;" === "A") {
+  keepDropped();
+} else {
+  keepLive();
+}
+var url = "http://evil.test/gate.php?a=1&amp;b=2";
+"""
+    result = deobfuscate(src, language="js")
+    assert result.parse_ok
+    assert "keepLive" in result.text
+    assert "keepDropped" not in result.text
+    assert "&amp;" in result.text
+
+
 def test_js_real_comparison_is_kept():
     src = 'if (user === "a") { keep(); } else { also(); }'
     result = deobfuscate(src, language="js")
