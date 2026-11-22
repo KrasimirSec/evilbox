@@ -16,7 +16,6 @@ from evilbox.decode import (
     percent_decode,
     pick_repeating_xor_text,
     rc4_crypt,
-    unescape_html_entities,
     unescape_js_string_body,
 )
 from evilbox.js.structure import simplify_js_structure
@@ -607,12 +606,12 @@ def _simplified_string(node, source: str) -> str | None:
     parsed = parse_js_quoted_string(raw)
     if parsed is None:
         return None
-    unescaped = unescape_html_entities(parsed)
-    quoted = js_quote(unescaped)
+    quoted = js_quote(parsed)
     if quoted == raw:
         return None
-    # Only rewrite if we actually expanded escapes / entities
-    if unescaped == parsed and "\\" not in raw and "&#" not in raw:
+    # HTML entities are literal text in JavaScript strings. Only rewrite
+    # backslash escapes the language itself decodes.
+    if "\\" not in raw:
         return None
     return quoted
 
@@ -640,7 +639,7 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         parsed = parse_js_quoted_string(node_text(source, node))
         if parsed is None:
             return None
-        return Value(unescape_html_entities(parsed))
+        return Value(parsed)
     if t == "template_string":
         return _eval_template(node, source, env)
     if t == "number":

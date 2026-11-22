@@ -102,6 +102,13 @@ def test_php_charset_index_preg_replace_e():
     assert "idx-unpacked" in result.text
 
 
+def test_php_string_literals_keep_html_entities():
+    src = """<?php $cmd = '&#101;cho "LIVE";'; eval($cmd);\n"""
+    result = deobfuscate(src, language="php")
+    assert "&#101;" in result.text
+    assert 'echo "LIVE"' not in result.text
+
+
 def test_html_entity_outside_latin1_does_not_crash():
     src = '<?php echo "&rsquo; and &inodot;"; $a = 1+1;'
     result = deobfuscate(src, language="php")

@@ -1031,13 +1031,14 @@ def _simplified_string(node, source: str) -> str | None:
     parsed = _php_string_value(node, source)
     if parsed is None:
         return None
-    unescaped = unescape_html_entities(parsed)
-    if "\0" in unescaped:
+    if "\0" in parsed:
         return None
-    quoted = php_quote(unescaped)
+    quoted = php_quote(parsed)
     if quoted == raw:
         return None
-    if unescaped == parsed and "\\" not in raw and "&#" not in raw:
+    # HTML entities are literal text in PHP strings. Only rewrite backslash
+    # escapes the language itself decodes.
+    if "\\" not in raw:
         return None
     return quoted
 
@@ -1108,7 +1109,7 @@ def const_eval(node, source: str, env: FoldEnv | None = None) -> Value | None:
         parsed = _php_string_value(node, source)
         if parsed is None:
             return None
-        return Value(unescape_html_entities(parsed))
+        return Value(parsed)
     if t in {"integer", "float"}:
         return _parse_php_number(node_text(source, node))
     if t == "name" and node_text(source, node).lower() in {"true", "false", "null"}:
