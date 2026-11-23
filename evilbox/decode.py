@@ -70,6 +70,114 @@ def parse_js_quoted_string(literal: str) -> str | None:
     return unescape_js_string_body(literal[1:-1])
 
 
+_JS_URI_RESERVED = ";/?:@&=+$,#"
+
+
+def _hex_byte(text: str, index: int) -> int | None:
+    if index + 1 >= len(text):
+        return None
+    pair = text[index : index + 2]
+    if not re.fullmatch(r"[0-9a-fA-F]{2}", pair):
+        return None
+    return int(pair, 16)
+
+
+def _leading_ones(byte: int) -> int:
+    count = 0
+    mask = 0x80
+    while byte & mask:
+        count += 1
+        mask >>= 1
+    return count
+
+
+def _utf8_codepoint(octets: list[int]) -> str | None:
+    """One Unicode scalar from a UTF-8 sequence, or None if it is not well-formed."""
+    if len(octets) < 2 or any((byte & 0xC0) != 0x80 for byte in octets[1:]):
+        return None
+    lead = octets[0]
+    if len(octets) == 2:
+        if lead & 0xE0 != 0xC0:
+            return None
+        point = ((lead & 0x1F) << 6) | (octets[1] & 0x3F)
+        if point < 0x80:
+            return None
+    elif len(octets) == 3:
+        if lead & 0xF0 != 0xE0:
+            return None
+        point = ((lead & 0x0F) << 12) | ((octets[1] & 0x3F) << 6) | (octets[2] & 0x3F)
+        if point < 0x800 or 0xD800 <= point <= 0xDFFF:
+            return None
+    elif len(octets) == 4:
+        if lead & 0xF8 != 0xF0:
+            return None
+        point = (
+            ((lead & 0x07) << 18)
+            | ((octets[1] & 0x3F) << 12)
+            | ((octets[2] & 0x3F) << 6)
+            | (octets[3] & 0x3F)
+        )
+        if point < 0x10000 or point > 0x10FFFF:
+            return None
+    else:
+        return None
+    return chr(point)
+
+
+def js_decode_uri(text: str, *, component: bool) -> str | None:
+    """JavaScript decodeURI / decodeURIComponent.
+
+    None means the call throws URIError, so the expression must stay unfolded.
+    decodeURI leaves percent-escapes of reserved characters in place. Both
+    functions decode %HH sequences as UTF-8, not as independent bytes.
+    """
+    reserved = "" if component else _JS_URI_RESERVED
+    out: list[str] = []
+    length = len(text)
+    index = 0
+    while index < length:
+        char = text[index]
+        if char != "%":
+            out.append(char)
+            index += 1
+            continue
+        start = index
+        if index + 2 >= length:
+            return None
+        byte = _hex_byte(text, index + 1)
+        if byte is None:
+            return None
+        index += 2
+        width = _leading_ones(byte)
+        if width == 0:
+            decoded = chr(byte)
+            if decoded in reserved:
+                out.append(text[start : index + 1])
+            else:
+                out.append(decoded)
+        elif width == 1 or width > 4:
+            return None
+        else:
+            if index + (3 * (width - 1)) >= length:
+                return None
+            octets = [byte]
+            for _ in range(width - 1):
+                index += 1
+                if index >= length or text[index] != "%":
+                    return None
+                nxt = _hex_byte(text, index + 1)
+                if nxt is None:
+                    return None
+                index += 2
+                octets.append(nxt)
+            decoded = _utf8_codepoint(octets)
+            if decoded is None:
+                return None
+            out.append(decoded)
+        index += 1
+    return "".join(out)
+
+
 def js_unescape(text: str) -> str:
     """JS unescape(): %uXXXX and %HH."""
     out: list[str] = []

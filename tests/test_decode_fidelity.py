@@ -9,6 +9,7 @@ from evilbox.decode import (
     MAX_CODEC_OUTPUT,
     expand_php_charlist,
     gzip_bytes,
+    js_decode_uri,
     php_bitwise_not,
     php_str_pad,
     php_string_bytes,
@@ -24,6 +25,22 @@ from evilbox.phpdiff import php_binary, php_eval_json
 
 def _php_quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def test_js_decode_uri_matches_javascript():
+    assert js_decode_uri("%41%42", component=True) == "AB"
+    assert js_decode_uri("Hello%20%C3%A9", component=True) == "Hello é"
+    assert js_decode_uri("%F0%9F%98%80", component=True) == "😀"
+    assert js_decode_uri("a%2Fb", component=True) == "a/b"
+    assert js_decode_uri("a%2Fb", component=False) == "a%2Fb"
+    assert js_decode_uri("%68%74%74%70%73%3A%2F%2Fevil.example%2Fgate", component=False) == (
+        "https%3A%2F%2Fevil.example%2Fgate"
+    )
+    assert js_decode_uri("%3a", component=False) == "%3a"
+    assert js_decode_uri("%252F", component=True) == "%2F"
+    for sample in ("%", "%ZZ", "%C3", "%80", "%FF", "%C0%AF", "%ED%A0%80", "100%", "%u0041"):
+        assert js_decode_uri(sample, component=True) is None
+        assert js_decode_uri(sample, component=False) is None
 
 
 def test_stripslashes_nul_and_trailing_backslash():
