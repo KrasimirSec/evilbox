@@ -11,6 +11,28 @@ def test_js_computed_fromcharcode():
     assert "fromCharCode" not in result.text
 
 
+def test_js_decode_uri_keeps_utf8_and_throws():
+    src = 'eval(decodeURIComponent("%76%61%72%20%61%3D%22caf%C3%A9%22%3B"));'
+    result = deobfuscate(src, language="js")
+    assert 'var a = "café";' in result.text
+    assert "Ã©" not in result.text
+
+    url = deobfuscate(
+        'var u = decodeURI("%68%74%74%70%73%3A%2F%2Fevil.example%2Fgate");',
+        language="js",
+    )
+    assert "https%3A%2F%2Fevil.example%2Fgate" in url.text
+    assert "https://evil.example/gate" not in url.text
+
+    caught = deobfuscate(
+        'try { decodeURIComponent("%FF"); decoy(); } catch (e) { payload(); }',
+        language="js",
+    )
+    assert "decodeURIComponent" in caught.text
+    assert "payload()" in caught.text
+    assert "ÿ" not in caught.text
+
+
 def test_js_window_atob():
     src = 'eval(window["atob"]("Y29uc29sZS5sb2coJ2hpJyk7"));'
     result = deobfuscate(src, language="js")
