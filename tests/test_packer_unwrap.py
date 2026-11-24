@@ -206,6 +206,24 @@ def test_percent_encoded_bookmarklet():
     src = "%65%76%61%6c%28%61%74%6f%62%28%22%59%32%39%75%63%32%39%73%5a%53%35%73%62%32%63%6f%4a%32%68%70%4a%79%6b%37%22%29%29%3b"
     result = deobfuscate(src, language="js")
     assert "console.log" in result.text
+    prefixed = deobfuscate("javascript:" + src, language="js")
+    assert "console.log" in prefixed.text
+
+
+def test_percent_prefix_does_not_rewrite_later_escapes():
+    """A long %HH blob is not a whole-file encoding.
+
+    Decoding the file turns the live literal into the other side of the
+    comparison, so dead-branch removal keeps PAYLOAD.
+    """
+    blob = "%61" * 80
+    src = (
+        'var blob = "' + blob + '";\n'
+        'var msg = ("keep-%41-me" === "keep-A-me") ? "PAYLOAD" : "DECOY";\n'
+    )
+    result = deobfuscate(src, language="js")
+    assert "DECOY" in result.text
+    assert "PAYLOAD" not in result.text
 
 
 def test_jjencode_hint_and_payload():

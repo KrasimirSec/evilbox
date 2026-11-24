@@ -436,12 +436,19 @@ def _unbaser(radix: int):
 
 
 def unwrap_percent_script(source: str) -> tuple[str, list[str]]:
-    """Whole-file percent-encoding used by some bookmarklets and droppers."""
+    """Whole-file percent-encoding used by some bookmarklets and droppers.
+
+    The sample itself must be percent-encoded: optional ``javascript:`` prefix,
+    then only ``%HH`` triplets and whitespace. A long encoded prefix is not
+    enough — decoding the rest of the file rewrites ``%HH`` literals in the
+    live source and can flip a later comparison.
+    """
     stripped = source.strip()
     if stripped.count("%") < 12:
         return source, []
-    sample = re.sub(r"\s+", "", stripped[:400])
-    if not sample or sample.count("%") * 3 < len(sample) * 0.6:
+    compact = re.sub(r"\s+", "", stripped)
+    body = re.sub(r"(?i)^javascript:", "", compact, count=1)
+    if not re.fullmatch(r"(?:%[0-9A-Fa-f]{2}){12,}", body):
         return source, []
     from evilbox.decode import percent_decode
 
