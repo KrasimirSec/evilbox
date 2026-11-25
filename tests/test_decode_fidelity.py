@@ -10,6 +10,7 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_float_to_string,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -41,6 +42,19 @@ def test_php_bitwise_not_rejects_non_bytes():
         php_string_bytes("日本語")
     with pytest.raises(ValueError):
         xor_strings("A", "Ω")
+
+
+def test_php_float_string_cast():
+    assert php_float_to_string(0.1 + 0.2) == "0.3"
+    assert php_float_to_string(1e-7) == "1.0E-7"
+    assert php_float_to_string(-1e-7) == "-1.0E-7"
+    assert php_float_to_string(1e15) == "1.0E+15"
+    assert php_float_to_string(1e21) == "1.0E+21"
+    assert php_float_to_string(1.0) == "1"
+    assert php_float_to_string(-0.0) == "-0"
+    assert php_float_to_string(float("inf")) == "INF"
+    assert php_float_to_string(float("-inf")) == "-INF"
+    assert php_float_to_string(float("nan")) == "NAN"
 
 
 def test_php_substr_version_oob():
@@ -101,6 +115,13 @@ def test_php_differential_property_folds():
             assert php_val == ours
 
     assert php_strtoupper("abc\xff") == "ABC\xff"
+    assert php_float_to_string(0.1 + 0.2) == php_eval_json("(string)(0.1+0.2)")
+    assert php_float_to_string(1e-7) == php_eval_json("(string)(1e-7)")
+    assert php_float_to_string(1e15) == php_eval_json("(string)(1e15)")
+    assert php_float_to_string(1 / 3) == php_eval_json("(string)(1/3)")
+    for exp in range(-12, 22):
+        php_val = php_eval_json(f"(string)(1.0 * pow(10,{exp}))")
+        assert php_float_to_string(10.0**exp) == php_val
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
 
