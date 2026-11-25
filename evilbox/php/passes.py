@@ -11,6 +11,7 @@ from evilbox.decode import (
     bzip_bytes,
     expand_php_charlist,
     format_php_number,
+    php_float_to_string,
     gzip_bytes,
     hex_decode,
     hex_payload_to_text,
@@ -1349,8 +1350,8 @@ def _as_php_string(value: Any) -> str:
         return "1"
     if value is False or value is None:
         return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if isinstance(value, float):
+        return php_float_to_string(value)
     return str(value)
 
 

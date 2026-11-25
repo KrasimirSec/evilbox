@@ -732,14 +732,37 @@ def php_str_pad(text: str, width: int, pad: str = " ", style: int = 1) -> str | 
     return text + fill
 
 
+def php_float_to_string(value: float) -> str:
+    """PHP ``(string)`` cast of a float at the default ``precision`` of 14.
+
+    Python ``str(0.1 + 0.2)`` is ``0.30000000000000004`` and ``str(1e-7)`` is
+    ``1e-07``. PHP spells those ``0.3`` and ``1.0E-7``. Concatenating the Python
+    text into an ``eval`` argument runs a different statement.
+    """
+    if value != value:
+        return "NAN"
+    if value == float("inf"):
+        return "INF"
+    if value == float("-inf"):
+        return "-INF"
+    text = format(value, ".14g")
+    if "e" not in text:
+        return text
+    mantissa, exponent = text.split("e", 1)
+    if "." not in mantissa:
+        mantissa += ".0"
+    sign = ""
+    if exponent[0] in "+-":
+        sign = exponent[0]
+        exponent = exponent[1:]
+    return f"{mantissa}E{sign}{int(exponent)}"
+
+
 def format_php_number(value: float | int) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, float):
+        return php_float_to_string(value)
     if isinstance(value, int) and value.bit_length() > 256:
         raise ValueError("integer too large to fold")
-    try:
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
-        return str(value)
-    except ValueError:
-        raise ValueError("integer too large to fold") from None
+    return str(value)

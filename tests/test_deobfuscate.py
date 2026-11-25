@@ -9,6 +9,24 @@ from evilbox.pipeline import deobfuscate
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_php_float_concat_matches_php_string_cast():
+    """PHP spells 0.1+0.2 as 0.3 and 1e-7 as 1.0E-7. Python's str() does not."""
+    src = "<?php eval(\"echo '\" . (0.1 + 0.2) . \"';\"); eval(\"echo '\" . (1/10000000) . \"';\");"
+    result = deobfuscate(src, language="php")
+    assert result.parse_ok
+    assert "0.30000000000000004" not in result.text
+    assert "1e-07" not in result.text
+    assert "echo '0.3'" in result.text
+    assert "echo '1.0E-7'" in result.text
+
+
+def test_php_inf_concat_does_not_abort_later_eval():
+    src = "<?php $n = 'x' . (1e309); eval(base64_decode('ZWNobyAnTElWRSc7'));"
+    result = deobfuscate(src, language="php")
+    assert "LIVE" in result.text
+    assert "xINF" in result.text
+
+
 def test_js_fromcharcode_and_concat():
     src = 'var x = String.fromCharCode(72,101,108,108,111) + " " + "world";'
     result = deobfuscate(src, language="js")
