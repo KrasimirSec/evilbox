@@ -65,6 +65,44 @@ def test_sibling_file_payload(tmp_path):
     assert "sibling-secret" in result.text
 
 
+def test_dirname_levels_reads_the_ancestor_payload(tmp_path):
+    """dirname(path, 3) walks three levels up. One level splices the decoy file."""
+    html = tmp_path / "html"
+    cache = html / "plugins" / "cache"
+    cache.mkdir(parents=True)
+    live = html / "payload.php"
+    decoy = cache / "payload.php"
+    live.write_text("<?php echo 'LIVE';\n", encoding="utf-8")
+    decoy.write_text("<?php echo 'WRONG';\n", encoding="utf-8")
+    shell = html / "shell.php"
+    nested = cache / "run.php"
+    shell.write_text(
+        "<?php eval(file_get_contents(dirname("
+        + repr(str(nested))
+        + ", 3) . '/payload.php'));\n",
+        encoding="utf-8",
+    )
+    result = deobfuscate(shell.read_text(encoding="utf-8"), language="php", path=str(shell))
+    assert "LIVE" in result.text
+    assert "WRONG" not in result.text
+    folded = deobfuscate(
+        "<?php $p = dirname('/var/www/html/shell.php', 2);",
+        language="php",
+    )
+    assert "/var/www'" in folded.text or '/var/www"' in folded.text
+    assert "/var/www/html" not in folded.text
+
+
+def test_dirname_non_positive_levels_stay_unfolded():
+    src = "<?php $p = dirname('/var/www/html/shell.php', 0);"
+    result = deobfuscate(src, language="php")
+    assert "dirname(" in result.text
+    huge = "<?php $p = dirname('/var/www/html/shell.php', 1e309); echo 'after';"
+    result = deobfuscate(huge, language="php")
+    assert "dirname(" in result.text
+    assert "after" in result.text
+
+
 def test_cluster_minhash_ignores_domain_and_key():
     a = deobfuscate('<?php $u = "http://evil.example/a"; eval($_POST["x"]);', language="php")
     b = deobfuscate('<?php $u = "http://other.example/b"; eval($_POST["x"]);', language="php")

@@ -17,6 +17,7 @@ from evilbox.decode import (
     looks_like_php_source,
     parse_quoted_string,
     php_bitwise_not,
+    php_dirname,
     php_quote,
     php_string_bytes,
     php_str_pad,
@@ -1803,13 +1804,34 @@ def _eval_call(node, source: str, env: FoldEnv | None = None) -> Value | None:
                 return Value(data)
 
     if name == "dirname" and values:
+        if len(values) > 2:
+            return None
         s = as_str(values[0])
-        if s:
-            from pathlib import Path
-
-            return Value(str(Path(s).parent))
+        if s is None:
+            return None
+        levels = 1
+        if len(values) > 1:
+            levels = _php_dirname_levels(values[1].py)
+            if levels is None:
+                return None
+        return Value(php_dirname(s, levels))
 
     return None
+
+
+def _php_dirname_levels(value: Any) -> int | None:
+    """PHP casts a numeric level toward zero and rejects anything below 1."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    try:
+        levels = int(value)
+    except (OverflowError, ValueError):
+        return None
+    if levels < 1:
+        return None
+    return levels
 
 
 def _eval_named(name: str, values: list[Value], source: str, env: FoldEnv | None) -> Value | None:
