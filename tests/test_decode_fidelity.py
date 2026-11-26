@@ -10,6 +10,7 @@ from evilbox.decode import (
     expand_php_charlist,
     gzip_bytes,
     php_bitwise_not,
+    php_dirname,
     php_str_pad,
     php_string_bytes,
     php_strtoupper,
@@ -41,6 +42,35 @@ def test_php_bitwise_not_rejects_non_bytes():
         php_string_bytes("日本語")
     with pytest.raises(ValueError):
         xor_strings("A", "Ω")
+
+
+def test_php_dirname_levels():
+    assert php_dirname("/var/www/html/shell.php", 2) == "/var/www"
+    assert php_dirname("/a/b/c") == "/a/b"
+    assert php_dirname("/a/b/c", 1) == "/a/b"
+    assert php_dirname("/a/b/c", 3) == "/"
+    assert php_dirname("/a/b/c", 4) == "/"
+    assert php_dirname("/a/b/c/") == "/a/b"
+    assert php_dirname("/a/b/c/", 2) == "/a"
+    assert php_dirname("a/b/c", 2) == "a"
+    assert php_dirname("file.php") == "."
+    assert php_dirname("file.php", 2) == "."
+    assert php_dirname(".") == "."
+    assert php_dirname("/", 2) == "/"
+    assert php_dirname("") == ""
+    assert php_dirname("//a//b") == "//a"
+    assert php_dirname("//a//b", 2) == "/"
+    assert php_dirname("//a//b", 3) == "/"
+    assert php_dirname("../a") == ".."
+    assert php_dirname("/a/../../b") == "/a/../.."
+    assert php_dirname("a/b/c///", 2) == "a"
+    assert php_dirname("a///b///") == "a"
+    assert php_dirname("///") == "/"
+    assert php_dirname("///a") == "/"
+    assert php_dirname(r"C:\a\b") == "."
+    assert php_dirname("/a/b/c", 10**18) == "/"
+    with pytest.raises(ValueError):
+        php_dirname("/a/b", 0)
 
 
 def test_php_substr_version_oob():
@@ -101,6 +131,18 @@ def test_php_differential_property_folds():
             assert php_val == ours
 
     assert php_strtoupper("abc\xff") == "ABC\xff"
+    for path, levels in (
+        ("/var/www/html/shell.php", 2),
+        ("/a/b/c", 1),
+        ("/a/b/c", 4),
+        ("a/b/c///", 2),
+        ("//a//b", 3),
+        ("file.php", 2),
+        ("", 1),
+        ("/", 2),
+    ):
+        php_val = php_eval_json(f"dirname({_php_quote(path)}, {levels})")
+        assert php_val == php_dirname(path, levels)
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
 

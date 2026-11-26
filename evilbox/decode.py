@@ -508,6 +508,41 @@ def stripslashes(text: str) -> str:
     return "".join(out)
 
 
+def php_dirname(path: str, levels: int = 1) -> str:
+    """PHP dirname() on Linux. Only `/` separates, and `levels` walks upward.
+
+    A path that is already `.`, `/`, or empty stays there, so a huge level
+    count cannot loop. The walk does not resolve `.` or `..`.
+    """
+    if levels < 1:
+        raise ValueError("dirname levels must be >= 1")
+    for _ in range(levels):
+        nxt = _php_dirname_once(path)
+        if nxt == path:
+            return path
+        path = nxt
+    return path
+
+
+def _php_dirname_once(path: str) -> str:
+    if not path:
+        return ""
+    end = len(path) - 1
+    while end >= 0 and path[end] == "/":
+        end -= 1
+    if end < 0:
+        return "/"
+    while end >= 0 and path[end] != "/":
+        end -= 1
+    if end < 0:
+        return "."
+    while end >= 0 and path[end] == "/":
+        end -= 1
+    if end < 0:
+        return "/"
+    return path[: end + 1]
+
+
 def php_substr(
     text: str,
     start: int,
