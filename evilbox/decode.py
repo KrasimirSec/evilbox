@@ -726,9 +726,11 @@ def php_str_pad(text: str, width: int, pad: str = " ", style: int = 1) -> str | 
     fill = (pad * (need // len(pad) + 1))[:need]
     if style == 0:  # STR_PAD_LEFT
         return fill + text
-    if style == 2:  # STR_PAD_BOTH
+    if style == 2:  # STR_PAD_BOTH; each side starts over at the first pad byte
         left = need // 2
-        return fill[:left] + text + fill[left:]
+        right = need - left
+        right_fill = (pad * (right // len(pad) + 1))[:right]
+        return fill[:left] + text + right_fill
     return text + fill
 
 
