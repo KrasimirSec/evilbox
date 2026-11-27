@@ -103,6 +103,9 @@ def test_php_differential_property_folds():
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
+    # STR_PAD_BOTH restarts the pad on the right. A continuous fill would be "abKcab".
+    assert php_str_pad("K", 6, "abc", 2) == "abKabc"
+    assert php_str_pad("Alien", 10, "-=", 2) == "-=Alien-=-"
 
     chars = [chr(n) for n in range(32, 127) if chr(n) not in "'\\"]
     for _ in range(16):

@@ -139,6 +139,13 @@ def test_php_str_replace_and_implode():
     assert "hi" in result.text
 
 
+def test_php_str_pad_both_restarts_on_the_right():
+    src = """<?php eval("echo '" . str_pad("K", 6, "abc", 2) . "';");"""
+    result = deobfuscate(src, language="php")
+    assert "abKabc" in result.text
+    assert "abKcab" not in result.text
+
+
 def test_php_sprintf_substr():
     src = "<?php $x = sprintf('%s%s', 'ab', 'cd'); $y = substr('hello', 1, 3);"
     result = deobfuscate(src, language="php")
