@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from evilbox.candidates import propose_from_cluster_groups
 from evilbox.classify import cluster_groups
 from evilbox.detect import PHP_EXTS, JS_EXTS, detect_language
 from evilbox.extract import format_indicators, ingest_sandbox, locate_indicators
@@ -213,6 +214,7 @@ def _run_batch(args) -> int:
             raise CliError(_os_message(exc, str(html_dir))) from exc
     status = 0
     cluster_samples: list[tuple[str, str]] = []
+    sample_data: dict[str, tuple[str, str]] = {}
     for sample in files:
         try:
             source = _read_text(sample)
@@ -227,7 +229,9 @@ def _run_batch(args) -> int:
             print(f"error: {sample}: {exc}", file=sys.stderr)
             status = 2
             continue
-        cluster_samples.append((str(sample), result.text))
+        cluster_key_text = result.canonical or result.text
+        cluster_samples.append((str(sample), cluster_key_text))
+        sample_data[str(sample)] = (source, result.text)
         rel = sample.relative_to(root)
         dest_dir = out_dir / rel.parent
         try:
@@ -255,6 +259,8 @@ def _run_batch(args) -> int:
         )
         try:
             code = _emit(fake, result, str(sample), stdout_code=False)
+            if result.canonical:
+                _write_text(dest_dir / (rel.stem + ".canonical" + rel.suffix), result.canonical)
         except Exception as exc:
             print(f"error: {sample}: {exc}", file=sys.stderr)
             status = 2
@@ -264,6 +270,21 @@ def _run_batch(args) -> int:
         print(f"{rel}: {', '.join(r.name for r in result.classification.roles) or 'unclassified'}", file=sys.stderr)
     clusters = cluster_groups(cluster_samples)
     _write_text(out_dir / "clusters.json", json.dumps(clusters, indent=2) + "\n")
+    candidate_reports = propose_from_cluster_groups(
+        clusters,
+        sample_data,
+        language=args.lang,
+    )
+    _write_text(
+        out_dir / "signature_candidates.json",
+        json.dumps([report.to_dict() for report in candidate_reports], indent=2) + "\n",
+    )
+    accepted = sum(1 for report in candidate_reports for rule in report.rules if rule.accepted)
+    if candidate_reports:
+        print(
+            f"signature candidates: {len(candidate_reports)} cluster(s), {accepted} accepted rule(s)",
+            file=sys.stderr,
+        )
     return status
 
 
@@ -443,6 +464,9 @@ def _emit(args, result, path: str | None, sandbox=None, stdout_code: bool = True
         _write_output(output, result.text)
     elif output:
         _write_text(Path(output), result.text)
+    if output and getattr(result, "canonical", None):
+        out = Path(output)
+        _write_text(out.with_name(out.stem + ".canonical" + out.suffix), result.canonical)
     if not result.parse_ok:
         print("error: parse failed after deobfuscation", file=sys.stderr)
         return 1

@@ -80,7 +80,7 @@ evilbox packed.js --sandbox observe --sandbox-host www.shop.test --timeout 25
 | `--timeout N` | Sandbox timeout in seconds (default: 15; JS visits use at least 20) |
 | `serve` | Local web UI + JSON API for paste/upload decoding |
 
-If the input is a directory, Evilbox walks `.js` / `.php` files and mirrors the relative layout under the output directory (`a/index.php` and `b/index.php` become `a/index.clean.php` and `b/index.clean.php`). Each file is decoded in isolation: a crash in one sample does not abort the batch. `clusters.json` groups similar inner layers with a token n-gram minhash (so a changed domain or key still groups a family). `cluster_sha256` remains an exact whitespace-normalized hash of the inner text.
+If the input is a directory, Evilbox walks `.js` / `.php` files and mirrors the relative layout under the output directory (`a/index.php` and `b/index.php` become `a/index.clean.php` and `b/index.clean.php`). Each file is decoded in isolation: a crash in one sample does not abort the batch. `clusters.json` groups similar inner layers with a token n-gram minhash (so a changed domain or key still groups a family). `cluster_sha256` is the SHA-256 of the **canonical** inner form (alpha-renamed locals, comments stripped). Batch runs also write `signature_candidates.json` (invariants per cluster, false-positive-checked against the clean WordPress corpus).
 
 `-o clean.js` also writes `clean.iocs.json` and `clean.report.json` unless `--report` is set.
 
@@ -123,6 +123,16 @@ The web path is **static only**: samples stay in memory for that request, are no
 
 The no-argument menu also has **Open the web decoder**.
 
+## Structural analysis
+
+After unpacking, Evilbox builds a **canonical form** (locals alpha-renamed, comments stripped) and a **behavior profile**: which sinks the code reaches, which superglobals / request sources feed them, and whether an eval-style decoder chain remains. Signatures and cluster keys use that normalized form so variable renaming and filler still group as one family.
+
+A **dead-code / filler pass** then drops functions and assignments that never flow into a live sink or WordPress entry hook (`add_action`, …). Fake plugins that bury a small shell under large unused helpers shrink before an analyst reads them.
+
+Every rewrite is recorded in a **transformation trace** (`pass`, before/after SHA-256 and size, short detail) so results stay auditable.
+
+In batch mode, Evilbox also writes `signature_candidates.json`: for each fuzzy cluster it finds invariants after normalization, proposes a YARA/PCRE rule, and **rejects** any needle that hits the clean WordPress corpus under `tests/corpus/wordpress_benign/`.
+
 ## Classification
 
 Roles are **multi-label** and evidence-backed. A sample can be a webshell and a mailer at the same time. Each role includes a score and snippets (layer + short excerpt).
@@ -159,6 +169,10 @@ JSON schema id: `evilbox.report.v1`. Fields include:
 - **indicators_by_layer** — the same IOCs tagged with the layer they appeared in (`sandbox` for observed traffic)
 - **correlation** — ATT&CK technique tags derived from capabilities/roles, typed `campaign_keys` (`domain:…`, `wallet:btc:…`, `mutex:…`, …) for joining samples, plus grouped pivots (network / identities / secrets / artifacts / behaviors) and cluster hashes
 - **surface_signatures** — full YARA rule plus PCRE needles from the **original** file only
+- **behavior** — sinks, sources, decoders, eval chains, structural features, and `canonical_sha256` of the normalized inner form
+- **dce** — dead-code elimination stats (functions/assignments/bytes removed)
+- **trace** — ordered transformation log for every unwrap/fold/pretty/DCE/canonicalize step
+- **canonical** — alpha-renamed, comment-stripped inner source used for clustering and structural signatures
 - **sandbox** — present when `--sandbox` was used (log dir, DNS hosts, HTTP/TCP, eval dump names, php version, request profile). Observed traffic is merged into `indicators` and tagged as layer `sandbox`
 - **sandbox_cross_check** — static inner layer vs sandbox eval-dump layer; disagreements are flagged
 
