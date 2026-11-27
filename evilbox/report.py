@@ -45,6 +45,10 @@ def build_report(
             sample=sample,
         ),
         "surface_signatures": result.surface.to_dict(),
+        "behavior": result.behavior.to_dict() if getattr(result, "behavior", None) else {},
+        "dce": result.dce.to_dict() if getattr(result, "dce", None) else None,
+        "trace": result.trace.to_dict() if getattr(result, "trace", None) else {"steps": [], "pass_count": 0, "changed_count": 0},
+        "canonical": getattr(result, "canonical", "") or "",
         "sandbox": sandbox,
         "sandbox_cross_check": (sandbox or {}).get("cross_check") if sandbox else getattr(result, "sandbox_cross_check", None),
     }
@@ -97,6 +101,41 @@ def format_analysis(report: dict[str, Any]) -> str:
         for item in surface[:12]:
             lines.append(f"  [{item['kind']}] {item['yara'][:80]}")
             lines.append(f"    why: {item['why']}")
+    behavior = report.get("behavior") or {}
+    if behavior.get("sinks") or behavior.get("sources") or behavior.get("eval_chains"):
+        lines.append("behavior:")
+        if behavior.get("sinks"):
+            lines.append("  sinks: " + ", ".join(behavior["sinks"]))
+        if behavior.get("sources"):
+            lines.append("  sources: " + ", ".join(behavior["sources"]))
+        if behavior.get("decoders"):
+            lines.append("  decoders: " + ", ".join(behavior["decoders"]))
+        if behavior.get("has_eval_chain"):
+            lines.append("  eval-chain: yes")
+        for chain in (behavior.get("eval_chains") or [])[:6]:
+            lines.append("  chain: " + " -> ".join(chain))
+        if behavior.get("canonical_sha256"):
+            lines.append(f"  canonical: {behavior['canonical_sha256']}")
+    dce = report.get("dce") or {}
+    if dce and (dce.get("removed_functions") or dce.get("removed_statements")):
+        lines.append(
+            "dce: "
+            f"removed {dce.get('removed_functions', 0)} function(s), "
+            f"{dce.get('removed_statements', 0)} assignment(s), "
+            f"{dce.get('bytes_removed', 0)} bytes"
+        )
+    trace = report.get("trace") or {}
+    if trace.get("pass_count"):
+        lines.append(
+            f"trace: {trace.get('changed_count', 0)}/{trace.get('pass_count', 0)} passes changed the text"
+        )
+        for step in (trace.get("steps") or []):
+            if not step.get("changed"):
+                continue
+            lines.append(
+                f"  [{step.get('pass')}] {step.get('before_size')} → {step.get('after_size')}"
+                + (f" ({step.get('detail')})" if step.get("detail") else "")
+            )
     correlation = report.get("correlation") or {}
     attack = correlation.get("attack") or []
     if attack:
@@ -147,6 +186,28 @@ def render_html(report: dict[str, Any]) -> str:
     encoded = esc(", ".join(e.get("name", "") for e in report.get("encoded_not_analyzable") or []) or "none")
     cross = report.get("sandbox_cross_check") or {}
     cross_html = esc(cross.get("detail") or "")
+    behavior = report.get("behavior") or {}
+    behavior_sinks = esc(", ".join(behavior.get("sinks") or []) or "none")
+    behavior_sources = esc(", ".join(behavior.get("sources") or []) or "none")
+    behavior_chains = "".join(
+        f"<li><code>{esc(' -> '.join(chain))}</code></li>"
+        for chain in (behavior.get("eval_chains") or [])[:12]
+    ) or "<li>none</li>"
+    dce = report.get("dce") or {}
+    dce_html = (
+        f"removed {esc(dce.get('removed_functions', 0))} function(s), "
+        f"{esc(dce.get('removed_statements', 0))} assignment(s), "
+        f"{esc(dce.get('bytes_removed', 0))} bytes"
+        if dce
+        else "n/a"
+    )
+    trace_rows = "".join(
+        f"<tr><td>{esc(step.get('pass'))}</td><td>{esc(step.get('changed'))}</td>"
+        f"<td>{esc(step.get('before_size'))} → {esc(step.get('after_size'))}</td>"
+        f"<td>{esc(step.get('detail'))}</td></tr>"
+        for step in (report.get("trace") or {}).get("steps") or []
+        if step.get("changed")
+    ) or "<tr><td colspan='4'>none</td></tr>"
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Evilbox report</title>
 <style>
@@ -163,7 +224,8 @@ language: {esc(sample.get("language"))}<br>
 sha256: <code>{esc(sample.get("sha256"))}</code><br>
 inner: <code>{esc(sample.get("inner_sha256"))}</code><br>
 cluster: <code>{esc(sample.get("cluster_sha256"))}</code><br>
-cluster minhash: <code>{esc(sample.get("cluster_minhash"))}</code></p>
+cluster minhash: <code>{esc(sample.get("cluster_minhash"))}</code><br>
+canonical: <code>{esc((behavior.get("canonical_sha256") or ""))}</code></p>
 <p>packer: {esc(", ".join(report.get("packer") or []))}<br>
 encoded, not analyzable: {encoded}<br>
 failed folds: {esc(report.get("failed_folds"))}<br>
@@ -171,6 +233,13 @@ sandbox cross-check: {cross_html}</p>
 <h2>Warnings</h2><ul>{warnings}</ul>
 <h2>Roles</h2><ul>{roles}</ul>
 <h2>Capabilities</h2><ul>{caps}</ul>
+<h2>Behavior</h2>
+<p>sinks: {behavior_sinks}<br>sources: {behavior_sources}<br>eval-chain: {esc(behavior.get("has_eval_chain"))}</p>
+<ul>{behavior_chains}</ul>
+<h2>Dead-code elimination</h2>
+<p>{dce_html}</p>
+<h2>Transformation trace</h2>
+<table><tr><th>pass</th><th>changed</th><th>size</th><th>detail</th></tr>{trace_rows}</table>
 <h2>Unresolved folds</h2>
 <table><tr><th>layer</th><th>kind</th><th>callee</th><th>why</th><th>snippet</th></tr>{folds}</table>
 <h2>Surface signatures (original layer)</h2>

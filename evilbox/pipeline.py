@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from evilbox.behavior import BehaviorProfile, analyze_structure
 from evilbox.classify import Classification, classify_layers, cluster_key, cluster_minhash
+from evilbox.dce import DceResult, eliminate_dead_code
 from evilbox.decode import looks_like_php_source
 from evilbox.detect import detect_language
 from evilbox.encoders import detect_commercial_encoders
@@ -17,6 +19,7 @@ from evilbox.php.passes import transform_php
 from evilbox.php.pretty import pretty_php
 from evilbox.rewrite import has_error
 from evilbox.signature import SurfaceSignatures, extract_surface
+from evilbox.trace import Trace
 from evilbox.unresolved import UnresolvedFold, scan_unresolved
 from evilbox.unwrap import unwrap_source
 
@@ -103,6 +106,10 @@ class Result:
     encoded_not_analyzable: list[dict[str, str]] = field(default_factory=list)
     php_version: str = "8.3"
     sandbox_cross_check: dict | None = None
+    behavior: BehaviorProfile = field(default_factory=BehaviorProfile)
+    dce: DceResult | None = None
+    trace: Trace = field(default_factory=Trace)
+    canonical: str = ""
 
 
 def _analysis_layers(layers: list[Layer]) -> list[tuple[str, str]]:
@@ -139,25 +146,38 @@ def deobfuscate(
 ) -> Result:
     lang = detect_language(source, path=path, lang=language)
     warnings: list[str] = []
+    trace = Trace()
     original = surface_text if surface_text is not None else source
     parse = parse_js if lang == "js" else parse_php
     layers = [_layer("original", "original", original, language=lang)]
     text = source
+    trace.record_note("load", original, detail=f"language={lang}")
     if surface_text is not None and source != original:
         layers.append(_layer("eval-dump", "eval-dump", source, language=lang))
+        trace.record("eval-dump", original, source, detail="sandbox eval dump as working text")
     if extra_layers:
         for extra_name, extra_text in extra_layers:
             if extra_text and extra_text != source and extra_text != original:
                 layers.append(_layer(extra_name, "eval-dump", extra_text, language=lang))
+                trace.record_note(extra_name, extra_text, detail="extra eval-dump layer")
 
     encoders = detect_commercial_encoders(original)
     if encoders:
         for hit in encoders:
             warnings.append(f"{hit.name}: {hit.detail}")
+        trace.record_note(
+            "commercial-encoder",
+            original,
+            detail=", ".join(hit.name for hit in encoders),
+        )
 
     for index in range(max(1, max_passes)):
+        before = text
         unwrapped, unwrap_warnings = unwrap_source(text, lang)
         warnings.extend(unwrap_warnings)
+        if unwrapped != text:
+            detail = "; ".join(unwrap_warnings[:3]) if unwrap_warnings else "packer/codec unwrap"
+            trace.record(f"unwrap-{index + 1}", text, unwrapped, detail=detail)
         if lang == "php":
             transformed, pass_warnings = transform_php(
                 unwrapped, php_version=php_version, path=path, original=original
@@ -165,6 +185,9 @@ def deobfuscate(
         else:
             transformed, pass_warnings = transform_js(unwrapped)
         warnings.extend(pass_warnings)
+        if transformed != unwrapped:
+            detail = "; ".join(pass_warnings[:3]) if pass_warnings else "constant fold / rewrite"
+            trace.record(f"transform-{index + 1}", unwrapped, transformed, detail=detail)
         nxt = transformed
         if nxt == text:
             break
@@ -174,6 +197,12 @@ def deobfuscate(
                 warnings.append("Decoded payload still has parser gaps; keeping the decoded text.")
                 text = nxt
                 layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
+                trace.record(
+                    f"pass-{index + 1}",
+                    before,
+                    text,
+                    detail="kept decoded text despite parser gaps",
+                )
                 continue
             warnings.append("A pass produced unparseable code; keeping the previous version of that rewrite.")
             if unwrapped != text:
@@ -181,20 +210,57 @@ def deobfuscate(
                 if not has_error(unwrap_tree.root_node) and unwrapped != nxt:
                     text = unwrapped
                     layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
+                    trace.record(
+                        f"pass-{index + 1}",
+                        before,
+                        text,
+                        detail="fell back to unwrap-only text",
+                    )
                     break
             prev_tree = parse(text)
             if not has_error(prev_tree.root_node):
                 break
         text = nxt
         layers.append(_layer(f"pass-{index + 1}", "unwrap", text, language=lang))
+        trace.record(f"pass-{index + 1}", before, text, detail="unwrap + fold accepted")
 
     pretty = pretty_js if lang == "js" else pretty_php
     pretty_text = pretty(text)
     if pretty_text != text:
+        trace.record("pretty", text, pretty_text, detail="formatter")
         text = pretty_text
         layers.append(_layer("inner", "pretty", text, language=lang))
     else:
         layers.append(_layer("inner", "inner", text, language=lang))
+
+    # Strip filler that never reaches a sink before structural analysis.
+    dce = eliminate_dead_code(text, language=lang)
+    warnings.extend(dce.warnings)
+    if dce.text != text:
+        trace.record(
+            "dead-code",
+            text,
+            dce.text,
+            detail=(
+                f"removed {dce.removed_functions} function(s), "
+                f"{dce.removed_statements} assignment(s)"
+            ),
+        )
+        text = dce.text
+        layers.append(_layer("dce", "dce", text, language=lang))
+
+    behavior = analyze_structure(text, language=lang)
+    canonical = behavior.canonical
+    trace.record_note(
+        "canonicalize",
+        canonical or text,
+        detail=(
+            f"sinks={len(behavior.sinks)} sources={len(behavior.sources)} "
+            f"eval_chain={behavior.has_eval_chain}"
+        ),
+    )
+    if canonical and canonical != text:
+        layers.append(_layer("canonical", "canonical", canonical, language=lang))
 
     tree = parse(text)
     parse_ok = not has_error(tree.root_node)
@@ -212,7 +278,12 @@ def deobfuscate(
         )
 
     unresolved = [item for layer in layers for item in layer.unresolved]
-    inner_unresolved = list(layers[-1].unresolved)
+    # Prefer unresolved from the pre-canonical inner/dce layer for failed_folds.
+    inner_layer = next(
+        (layer for layer in reversed(layers) if layer.kind in {"inner", "pretty", "dce", "unwrap"}),
+        layers[-1],
+    )
+    inner_unresolved = list(inner_layer.unresolved)
     failed_folds = any(
         item.kind in {"decoder", "packer", "recovered"} for item in inner_unresolved
     )
@@ -222,7 +293,7 @@ def deobfuscate(
     # Middle passes repeat the unpacked shell. Scanning every copy is what makes
     # a large eval payload exceed the web decode limit.
     layer_pairs = _analysis_layers(layers)
-    indicators = extract_indicators(*(text for _name, text in layer_pairs))
+    indicators = extract_indicators(*(layer_text for _name, layer_text in layer_pairs))
     classification = classify_layers(layer_pairs, language=lang)
     surface = extract_surface(original, language=lang)
     packer = packer_hints(original)
@@ -245,13 +316,17 @@ def deobfuscate(
         indicators_by_layer=locate_indicators(layer_pairs),
         original_sha256=sha256_text(original),
         inner_sha256=sha256_text(text),
-        cluster_sha256=cluster_key(text),
-        cluster_minhash=cluster_minhash(text),
+        cluster_sha256=cluster_key(canonical or text),
+        cluster_minhash=cluster_minhash(canonical or text),
         unresolved_folds=unresolved,
         failed_folds=failed_folds,
         encoded_not_analyzable=[hit.to_dict() for hit in encoders],
         php_version=php_version,
         sandbox_cross_check=sandbox_cross_check,
+        behavior=behavior,
+        dce=dce,
+        trace=trace,
+        canonical=canonical,
     )
 
 
