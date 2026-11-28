@@ -1,3 +1,4 @@
+import base64
 import binascii
 import gzip
 import random
@@ -20,6 +21,7 @@ from evilbox.decode import (
     xor_strings,
 )
 from evilbox.phpdiff import php_binary, php_eval_json
+from evilbox.pipeline import deobfuscate
 
 
 def _php_quote(value: str) -> str:
@@ -102,6 +104,7 @@ def test_php_differential_property_folds():
 
     assert php_strtoupper("abc\xff") == "ABC\xff"
     assert expand_php_charlist("a..c") == "abc"
+    assert expand_php_charlist("c..a") == "c..a"
     assert php_str_pad("x", 5, "ab", 1) == "xabab"
 
     chars = [chr(n) for n in range(32, 127) if chr(n) not in "'\\"]
@@ -109,3 +112,52 @@ def test_php_differential_property_folds():
         raw = "".join(rng.choice(chars) for _ in range(rng.randint(1, 12)))
         php_val = php_eval_json("~" + _php_quote(raw))
         assert php_val == php_bitwise_not(raw)
+
+
+def _php_trim(fn: str, text: str, mask: str) -> str:
+    def blob(value: str) -> str:
+        return base64.b64encode(value.encode("latin-1")).decode("ascii")
+
+    return php_eval_json(f"{fn}(base64_decode('{blob(text)}'), base64_decode('{blob(mask)}'))")
+
+
+def _fold_trim(fn: str, text: str, mask: str) -> str:
+    chars = expand_php_charlist(mask)
+    if fn == "ltrim":
+        return text.lstrip(chars)
+    if fn == "rtrim":
+        return text.rstrip(chars)
+    return text.strip(chars)
+
+
+def test_descending_trim_keeps_live_echo():
+    """`z..a` is the bytes z, dot, dot, a. Reversing it eats the echo keyword."""
+    src = "<?php\n$c = trim(\"zzzecho 'LIVE';zzz\", \"z..a\");\neval($c);\n"
+    result = deobfuscate(src, language="php")
+    assert "echo 'LIVE'" in result.text
+
+
+@pytest.mark.skipif(php_binary() is None, reason="php CLI not installed")
+def test_php_trim_charlist_ranges():
+    subject = "zzzecho 'LIVE';zzz\x00\t\n\r ."
+    masks = [
+        "z..a",
+        "c..a",
+        "a..c",
+        "a..z",
+        "a...z",
+        "..",
+        "a..",
+        "..z",
+        "0..9",
+        "\x00..\x1f",
+        "\x20..\x00",
+        "",
+    ]
+    rng = random.Random(2026)
+    alphabet = "".join(chr(code) for code in range(256))
+    for _ in range(16):
+        masks.append("".join(rng.choice(alphabet) for _ in range(rng.randint(0, 6))))
+    for fn in ("trim", "ltrim", "rtrim"):
+        for mask in masks:
+            assert _fold_trim(fn, subject, mask) == _php_trim(fn, subject, mask)
