@@ -699,17 +699,21 @@ def php_strtolower(text: str) -> str:
 
 
 def expand_php_charlist(mask: str) -> str:
-    """PHP trim/chop charlist: `a..z` is a range of bytes."""
+    """PHP trim charlist. `a..z` is a range only when the end byte is >= the start.
+
+    A descending pair such as `z..a` is four literal bytes. PHP does not walk it
+    backwards, so reversing the range strips letters the runtime keeps.
+    """
     out: list[str] = []
     i = 0
     n = len(mask)
     while i < n:
         if i + 3 < n and mask[i + 1] == "." and mask[i + 2] == ".":
             start, end = ord(mask[i]), ord(mask[i + 3])
-            step = 1 if end >= start else -1
-            out.extend(chr(code) for code in range(start, end + step, step))
-            i += 4
-            continue
+            if end >= start:
+                out.extend(chr(code) for code in range(start, end + 1))
+                i += 4
+                continue
         out.append(mask[i])
         i += 1
     return "".join(out)
